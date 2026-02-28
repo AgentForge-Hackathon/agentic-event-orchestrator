@@ -55,7 +55,7 @@ export type LLMPlan = z.infer<typeof LLMPlanSchema>;
 export type LLMPlanItem = z.infer<typeof LLMPlanItemSchema>;
 
 // ============================================
-// Helper Functions
+// Time / Domain Helpers
 // ============================================
 
 /** Parse HH:MM string into minutes since midnight */
@@ -70,6 +70,7 @@ function formatTime(minutes: number): string {
   const m = minutes % 60;
   return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
 }
+
 /** SGT offset in minutes (UTC+8) */
 const SGT_OFFSET_MINUTES = 8 * 60;
 
@@ -117,6 +118,10 @@ function buildDatetime(dateStr: string, timeStr: string): string {
   return `${datePart}T${utcH}:${utcM}:00.000Z`;
 }
 
+// ============================================
+// Plan Constants
+// ============================================
+
 /** Maximum number of itinerary items (including main event) */
 const MAX_ITINERARY_ITEMS = 4;
 
@@ -128,6 +133,10 @@ const MAX_GAP_MINUTES = 45;
 
 /** Maximum total plan span in hours — warns if exceeded */
 const MAX_PLAN_SPAN_HOURS = 8;
+
+// ============================================
+// Event Matching Helpers
+// ============================================
 
 /** Normalize a string for fuzzy matching: lowercase, strip punctuation, collapse whitespace */
 function normalize(s: string): string {
@@ -171,6 +180,259 @@ function fuzzyMatchEvent(
     }
   }
   return bestMatch;
+}
+
+// ============================================
+// Plan Parsing
+// ============================================
+
+type RankedEvent = { event: Event; score: number; reasoning?: string };
+
+/**
+ * Parse and validate the raw LLM plan JSON.
+ * Returns the validated plan, or throws with `{ fallback: true }` if validation fails.
+ */
+function parseLLMPlan(rawPlan: unknown): LLMPlan {
+  return LLMPlanSchema.parse(rawPlan);
+}
+
+/**
+ * Build the fallback return value when LLM plan validation fails.
+ * Falls back to the top-ranked discovered event.
+ */
+function buildFallbackItinerary(
+  rankedEvents: RankedEvent[],
+  date: string,
+  now: string,
+) {
+  const fallbackItems: ItineraryItem[] = rankedEvents.slice(0, 1).map((r, i) => ({
+    id: `item-fallback-${i}-${Date.now()}`,
+    event: r.event,
+    scheduledTime: r.event.timeSlot,
+    travelTimeFromPrevious: undefined,
+    travelMode: undefined,
+    status: 'planned' as const,
+    notes: `Ranked #${i + 1} — ${r.reasoning ?? ''}`,
+  }));
+
+  return {
+    itinerary: {
+      id: `itinerary-${Date.now()}`,
+      name: 'Your Plan (simplified)',
+      date: date.includes('T') ? date : `${date}T00:00:00.000Z`,
+      items: fallbackItems,
+      totalCost: rankedEvents.slice(0, 1).reduce((sum, r) => sum + (r.event.price?.max ?? 0), 0),
+      totalDuration: 0,
+      status: 'draft' as const,
+      createdAt: now,
+      updatedAt: now,
+    },
+    planMetadata: {
+      itineraryName: 'Simplified Plan',
+      overallVibe: undefined,
+      practicalTips: undefined,
+      weatherConsideration: undefined,
+      budgetStatus: 'within_budget',
+      budgetNotes: 'LLM plan validation failed — showing ranked events only',
+      totalEstimatedCostPerPerson: 0,
+      itemCount: fallbackItems.length,
+      mainEventCount: fallbackItems.length,
+      generatedActivityCount: 0,
+    },
+    warnings: ['LLM plan validation failed — showing top ranked events as fallback'],
+  };
+}
+
+/**
+ * Enforce the item cap: keep all main events, fill remaining slots with complementary activities.
+ * Mutates the plan's items array in-place via object spread.
+ */
+function applyItemCap(plan: LLMPlan, warnings: string[]): LLMPlan {
+  if (plan.items.length <= MAX_ITINERARY_ITEMS) return plan;
+
+  warnings.push(`Item cap: LLM generated ${plan.items.length} items but max is ${MAX_ITINERARY_ITEMS}. Keeping main events and trimming complementary activities.`);
+  console.log(`[plan-itinerary] ⚠️ Trimming ${plan.items.length} items to max ${MAX_ITINERARY_ITEMS}`);
+
+  const mainItems = plan.items.filter(i => i.isMainEvent);
+  const complementaryItems = plan.items.filter(i => !i.isMainEvent);
+  const remainingSlots = MAX_ITINERARY_ITEMS - mainItems.length;
+  const trimmedItems = [...mainItems, ...complementaryItems.slice(0, Math.max(0, remainingSlots))];
+  trimmedItems.sort((a, b) => parseTime(a.startTime) - parseTime(b.startTime));
+
+  return { ...plan, items: trimmedItems };
+}
+
+// ============================================
+// Item Conversion
+// ============================================
+
+/**
+ * Convert a single LLM plan item to a domain ItineraryItem.
+ * Applies real event time corrections for matched main events.
+ * Returns null if the item should be dropped (e.g. past hard cutoff).
+ */
+function convertLLMItemToItineraryItem(
+  item: LLMPlanItem,
+  index: number,
+  matchedReal: RankedEvent | undefined,
+  date: string,
+  rankedEvents: RankedEvent[],
+  prevEndMinutes: number | null,
+  prevItemName: string | undefined,
+  warnings: string[],
+): { itineraryItem: ItineraryItem; endMinutes: number } | null {
+  const itemId = `item-${index}-${Date.now()}`;
+
+  // Build default ISO datetimes from LLM-provided times
+  let startDatetime = buildDatetime(date, item.startTime);
+  let endDatetime = buildDatetime(date, item.endTime);
+
+  // CRITICAL: For main events matched to real discovered events,
+  // force the scheduled time to the real event's time slot.
+  // The LLM sometimes hallucinates incorrect times.
+  if (matchedReal && item.isMainEvent) {
+    const realStart = matchedReal.event.timeSlot.start;
+    const realEnd = matchedReal.event.timeSlot.end;
+    const realStartHHMM = extractTimeFromISO(realStart);
+    const realEndHHMM = extractTimeFromISO(realEnd);
+
+    if (item.startTime !== realStartHHMM || item.endTime !== realEndHHMM) {
+      warnings.push(`Time correction: LLM scheduled "${item.name}" at ${item.startTime}–${item.endTime} but the real event runs ${realStartHHMM}–${realEndHHMM}. Using real event times.`);
+      console.log(`[plan-itinerary] ⚠️ Correcting main event time: LLM said ${item.startTime}–${item.endTime}, real event is ${realStartHHMM}–${realEndHHMM}`);
+    }
+
+    startDatetime = realStart;
+    endDatetime = realEnd;
+  }
+
+  // Build the Event object — use real event if matched, otherwise synthesize from LLM data
+  const event: Event = matchedReal?.event ?? {
+    id: `generated-${index}-${Date.now()}`,
+    name: item.name,
+    description: item.description,
+    category: item.category,
+    location: {
+      name: item.location.name,
+      address: item.location.address,
+      lat: 1.3521, // Default Singapore coordinates
+      lng: 103.8198,
+    },
+    timeSlot: {
+      start: startDatetime,
+      end: endDatetime,
+    },
+    price: {
+      min: item.estimatedCostPerPerson,
+      max: item.estimatedCostPerPerson,
+      currency: 'SGD',
+    },
+    rating: undefined,
+    sourceUrl: item.sourceUrl ?? `https://www.google.com/search?q=${encodeURIComponent(item.name + ' Singapore')}`,
+    source: item.isMainEvent ? 'discovered' : 'planned',
+    availability: 'unknown',
+    bookingRequired: item.bookingRequired,
+  };
+
+  const travelMinutes = item.travelFromPrevious?.durationMinutes ?? 0;
+  const travelMode = item.travelFromPrevious?.mode
+    ? mapTravelMode(item.travelFromPrevious.mode)
+    : undefined;
+
+  // Use the actual (possibly corrected) times for sequencing checks
+  const actualStartTime = matchedReal && item.isMainEvent
+    ? extractTimeFromISO(startDatetime)
+    : item.startTime;
+  const actualEndTime = matchedReal && item.isMainEvent
+    ? extractTimeFromISO(endDatetime)
+    : item.endTime;
+
+  // Check for tight transitions and gaps
+  const startMinutes = parseTime(actualStartTime);
+  if (prevEndMinutes !== null) {
+    const gap = startMinutes - prevEndMinutes;
+    if (gap < 0) {
+      warnings.push(`Time overlap: "${prevItemName}" ends at ${formatTime(prevEndMinutes)} but "${item.name}" starts at ${actualStartTime}`);
+    } else if (gap < 5 && travelMinutes > 0) {
+      warnings.push(`Tight transition: only ${gap}min between "${prevItemName}" and "${item.name}" (${travelMinutes}min travel needed)`);
+    } else if (gap > MAX_GAP_MINUTES) {
+      warnings.push(`Excessive gap: ${gap}min idle time between "${prevItemName}" (ends ${formatTime(prevEndMinutes)}) and "${item.name}" (starts ${actualStartTime}). Max recommended: ${MAX_GAP_MINUTES}min`);
+      console.log(`[plan-itinerary] ⚠️ Excessive gap: ${gap}min between "${prevItemName}" and "${item.name}"`);
+    }
+  }
+
+  const endMinutes = parseTime(actualEndTime);
+
+  // ── Hard time boundary check ──
+  if (endMinutes > HARD_END_CUTOFF_MINUTES && !item.isMainEvent) {
+    warnings.push(`Dropped "${item.name}" — ends at ${actualEndTime} which is past the ${formatTime(HARD_END_CUTOFF_MINUTES)} cutoff`);
+    console.log(`[plan-itinerary] ⚠️ Dropping "${item.name}" (ends ${actualEndTime}, past ${formatTime(HARD_END_CUTOFF_MINUTES)} cutoff)`);
+    return null;
+  }
+  if (endMinutes > HARD_END_CUTOFF_MINUTES && item.isMainEvent) {
+    warnings.push(`Main event "${item.name}" ends at ${actualEndTime} which is past ${formatTime(HARD_END_CUTOFF_MINUTES)} — included because it's the main event`);
+  }
+
+  // Build notes with vibe context
+  const noteParts: string[] = [];
+  if (item.vibeNotes) noteParts.push(item.vibeNotes);
+  if (item.travelFromPrevious?.description) noteParts.push(`Getting there: ${item.travelFromPrevious.description}`);
+  if (item.priceCategory) noteParts.push(`Price tier: ${item.priceCategory}`);
+  if (matchedReal) noteParts.push(`Ranked #${rankedEvents.indexOf(matchedReal) + 1} (score: ${matchedReal.score})`);
+
+  const itineraryItem: ItineraryItem = {
+    id: itemId,
+    event,
+    scheduledTime: {
+      start: startDatetime,
+      end: endDatetime,
+    },
+    travelTimeFromPrevious: travelMinutes > 0 ? travelMinutes : undefined,
+    travelMode,
+    status: 'planned',
+    notes: noteParts.length > 0 ? noteParts.join(' | ') : undefined,
+  };
+
+  return { itineraryItem, endMinutes };
+}
+
+// ============================================
+// Validation Helpers
+// ============================================
+
+/**
+ * Sort itinerary items chronologically and warn if the total plan span is too long.
+ */
+function validateTimeSequencing(items: ItineraryItem[], warnings: string[]): void {
+  items.sort((a, b) =>
+    new Date(a.scheduledTime.start).getTime() - new Date(b.scheduledTime.start).getTime()
+  );
+
+  if (items.length < 2) return;
+
+  const firstStart = new Date(items[0].scheduledTime.start).getTime();
+  const lastEnd = new Date(items[items.length - 1].scheduledTime.end).getTime();
+  const totalSpanHours = (lastEnd - firstStart) / (1000 * 60 * 60);
+
+  if (totalSpanHours > MAX_PLAN_SPAN_HOURS) {
+    warnings.push(`Plan span too long: ${totalSpanHours.toFixed(1)} hours from first activity to last (max recommended: ${MAX_PLAN_SPAN_HOURS}h)`);
+    console.log(`[plan-itinerary] ⚠️ Plan spans ${totalSpanHours.toFixed(1)}h — exceeds ${MAX_PLAN_SPAN_HOURS}h recommendation`);
+  }
+
+  console.log(
+    `[plan-itinerary] Total plan span: ${totalSpanHours.toFixed(1)} hours (${formatTime(parseTime(extractTimeFromISO(items[0].scheduledTime.start)))} – ${formatTime(parseTime(extractTimeFromISO(items[items.length - 1].scheduledTime.end)))})`,
+  );
+}
+
+/**
+ * Warn if total cost per person exceeds the budget cap.
+ */
+function validateBudget(totalCostPerPerson: number, budgetMax: number | undefined, warnings: string[]): void {
+  if (budgetMax == null) return;
+  if (totalCostPerPerson > budgetMax * 1.2) {
+    warnings.push(`Budget overrun: estimated $${totalCostPerPerson}/person exceeds $${budgetMax} budget by $${totalCostPerPerson - budgetMax}`);
+  } else if (totalCostPerPerson > budgetMax) {
+    warnings.push(`Slightly over budget: estimated $${totalCostPerPerson}/person vs $${budgetMax} budget`);
+  }
 }
 
 // ============================================
@@ -229,67 +491,20 @@ export const planItineraryTool = createTool({
     // ── Step 1: Parse and validate the LLM output ──
     let plan: LLMPlan;
     try {
-      plan = LLMPlanSchema.parse(rawPlan);
+      plan = parseLLMPlan(rawPlan);
       console.log(`[plan-itinerary] Parsed plan: "${plan.itineraryName}" with ${plan.items.length} items`);
     } catch (err) {
       console.error(`[plan-itinerary] LLM plan validation failed:`, err);
-      // Return a minimal itinerary with the ranked events as fallback
-      const fallbackItems: ItineraryItem[] = rankedEvents.slice(0, 1).map((r, i) => ({
-        id: `item-fallback-${i}-${Date.now()}`,
-        event: r.event,
-        scheduledTime: r.event.timeSlot,
-        travelTimeFromPrevious: undefined,
-        travelMode: undefined,
-        status: 'planned' as const,
-        notes: `Ranked #${i + 1} — ${r.reasoning ?? ''}`,
-      }));
-
-      return {
-        itinerary: {
-          id: `itinerary-${Date.now()}`,
-          name: 'Your Plan (simplified)',
-          date: date.includes('T') ? date : `${date}T00:00:00.000Z`,
-          items: fallbackItems,
-          totalCost: rankedEvents.slice(0, 1).reduce((sum, r) => sum + (r.event.price?.max ?? 0), 0),
-          totalDuration: 0,
-          status: 'draft' as const,
-          createdAt: now,
-          updatedAt: now,
-        },
-        planMetadata: {
-          itineraryName: 'Simplified Plan',
-          overallVibe: undefined,
-          practicalTips: undefined,
-          weatherConsideration: undefined,
-          budgetStatus: 'within_budget',
-          budgetNotes: 'LLM plan validation failed — showing ranked events only',
-          totalEstimatedCostPerPerson: 0,
-          itemCount: fallbackItems.length,
-          mainEventCount: fallbackItems.length,
-          generatedActivityCount: 0,
-        },
-        warnings: ['LLM plan validation failed — showing top ranked events as fallback'],
-      };
+      return buildFallbackItinerary(rankedEvents, date, now);
     }
 
-    // ── Step 2: Build a lookup for real discovered events ──
-    const eventsByName = new Map<string, { event: Event; score: number; reasoning?: string }>();
+    // ── Step 2: Build event lookup + enforce item cap ──
+    const eventsByName = new Map<string, RankedEvent>();
     for (const r of rankedEvents) {
       eventsByName.set(r.event.name.toLowerCase().trim(), r);
     }
 
-    // ── Step 2b: Enforce item cap ──
-    if (plan.items.length > MAX_ITINERARY_ITEMS) {
-      warnings.push(`Item cap: LLM generated ${plan.items.length} items but max is ${MAX_ITINERARY_ITEMS}. Keeping main events and trimming complementary activities.`);
-      console.log(`[plan-itinerary] ⚠️ Trimming ${plan.items.length} items to max ${MAX_ITINERARY_ITEMS}`);
-      // Keep all main events, then fill remaining slots with complementary activities in order
-      const mainItems = plan.items.filter(i => i.isMainEvent);
-      const complementaryItems = plan.items.filter(i => !i.isMainEvent);
-      const remainingSlots = MAX_ITINERARY_ITEMS - mainItems.length;
-      plan = { ...plan, items: [...mainItems, ...complementaryItems.slice(0, Math.max(0, remainingSlots))] };
-      // Re-sort chronologically by startTime
-      plan.items.sort((a, b) => parseTime(a.startTime) - parseTime(b.startTime));
-    }
+    plan = applyItemCap(plan, warnings);
 
     // ── Step 3: Convert each LLM plan item to an ItineraryItem ──
     const itineraryItems: ItineraryItem[] = [];
@@ -299,9 +514,7 @@ export const planItineraryTool = createTool({
 
     for (let i = 0; i < plan.items.length; i++) {
       const item = plan.items[i];
-      const itemId = `item-${i}-${Date.now()}`;
 
-      // Try to match this item to a real discovered event (fuzzy matching)
       const matchedReal = item.isMainEvent
         ? fuzzyMatchEvent(item.name, eventsByName)
         : undefined;
@@ -312,156 +525,35 @@ export const planItineraryTool = createTool({
         console.log(`[plan-itinerary] ⚠️ Could not match main event "${item.name}" to any discovered event — using LLM times (may be inaccurate)`);
         warnings.push(`Unmatched main event: "${item.name}" could not be matched to discovered events. Times may be inaccurate.`);
       }
-      // Build the Event object — default to LLM-provided times
-      let startDatetime = buildDatetime(date, item.startTime);
-      let endDatetime = buildDatetime(date, item.endTime);
 
-      // CRITICAL: For main events matched to real discovered events,
-      // force the scheduled time to the real event's time slot.
-      // The LLM sometimes hallucinates incorrect times.
-      if (matchedReal && item.isMainEvent) {
-        const realStart = matchedReal.event.timeSlot.start;
-        const realEnd = matchedReal.event.timeSlot.end;
-        const realStartHHMM = extractTimeFromISO(realStart);
-        const realEndHHMM = extractTimeFromISO(realEnd);
+      const result = convertLLMItemToItineraryItem(
+        item,
+        i,
+        matchedReal,
+        date,
+        rankedEvents,
+        prevEndMinutes,
+        plan.items[i - 1]?.name,
+        warnings,
+      );
 
-        // Check if LLM times differ from real event times
-        if (item.startTime !== realStartHHMM || item.endTime !== realEndHHMM) {
-          warnings.push(`Time correction: LLM scheduled "${item.name}" at ${item.startTime}–${item.endTime} but the real event runs ${realStartHHMM}–${realEndHHMM}. Using real event times.`);
-          console.log(`[plan-itinerary] ⚠️ Correcting main event time: LLM said ${item.startTime}–${item.endTime}, real event is ${realStartHHMM}–${realEndHHMM}`);
-        }
+      if (!result) continue; // Item dropped (past hard cutoff)
 
-        // Override with real event times
-        startDatetime = realStart;
-        endDatetime = realEnd;
-      }
-
-      const event: Event = matchedReal?.event ?? {
-        id: `generated-${i}-${Date.now()}`,
-        name: item.name,
-        description: item.description,
-        category: item.category,
-        location: {
-          name: item.location.name,
-          address: item.location.address,
-          lat: 1.3521, // Default Singapore coordinates
-          lng: 103.8198,
-        },
-        timeSlot: {
-          start: startDatetime,
-          end: endDatetime,
-        },
-        price: {
-          min: item.estimatedCostPerPerson,
-          max: item.estimatedCostPerPerson,
-          currency: 'SGD',
-        },
-        rating: undefined,
-        sourceUrl: item.sourceUrl ?? `https://www.google.com/search?q=${encodeURIComponent(item.name + ' Singapore')}`,
-        source: item.isMainEvent ? 'discovered' : 'planned',
-        availability: 'unknown',
-        bookingRequired: item.bookingRequired,
-      };
-
-      // Compute travel time from previous
-      const travelMinutes = item.travelFromPrevious?.durationMinutes ?? 0;
-      const travelMode = item.travelFromPrevious?.mode
-        ? mapTravelMode(item.travelFromPrevious.mode)
-        : undefined;
-
-      // For time sequencing checks, use the actual scheduled times (which may have been corrected)
-      const actualStartTime = matchedReal && item.isMainEvent
-        ? extractTimeFromISO(startDatetime)
-        : item.startTime;
-      const actualEndTime = matchedReal && item.isMainEvent
-        ? extractTimeFromISO(endDatetime)
-        : item.endTime;
-
-      // Check for tight transitions (less than 5 minutes between activities)
-      const startMinutes = parseTime(actualStartTime);
-      if (prevEndMinutes !== null) {
-        const gap = startMinutes - prevEndMinutes;
-        if (gap < 0) {
-          warnings.push(`Time overlap: "${plan.items[i - 1]?.name}" ends at ${formatTime(prevEndMinutes)} but "${item.name}" starts at ${actualStartTime}`);
-        } else if (gap < 5 && travelMinutes > 0) {
-          warnings.push(`Tight transition: only ${gap}min between "${plan.items[i - 1]?.name}" and "${item.name}" (${travelMinutes}min travel needed)`);
-        } else if (gap > MAX_GAP_MINUTES) {
-          warnings.push(`Excessive gap: ${gap}min idle time between "${plan.items[i - 1]?.name}" (ends ${formatTime(prevEndMinutes)}) and "${item.name}" (starts ${actualStartTime}). Max recommended: ${MAX_GAP_MINUTES}min`);
-          console.log(`[plan-itinerary] ⚠️ Excessive gap: ${gap}min between "${plan.items[i - 1]?.name}" and "${item.name}"`);
-        }
-      }
-
-      const endMinutes = parseTime(actualEndTime);
-
-      // ── Hard time boundary check ──
-      // Drop non-main-event items that end after 23:00 (unless they're the main event)
-      if (endMinutes > HARD_END_CUTOFF_MINUTES && !item.isMainEvent) {
-        warnings.push(`Dropped "${item.name}" — ends at ${actualEndTime} which is past the ${formatTime(HARD_END_CUTOFF_MINUTES)} cutoff`);
-        console.log(`[plan-itinerary] ⚠️ Dropping "${item.name}" (ends ${actualEndTime}, past ${formatTime(HARD_END_CUTOFF_MINUTES)} cutoff)`);
-        continue; // Skip this item entirely
-      }
-      // Warn if main event ends after cutoff (but still include it since it's real)
-      if (endMinutes > HARD_END_CUTOFF_MINUTES && item.isMainEvent) {
-        warnings.push(`Main event "${item.name}" ends at ${actualEndTime} which is past ${formatTime(HARD_END_CUTOFF_MINUTES)} — included because it's the main event`);
-      }
-
-      prevEndMinutes = endMinutes;
-
-      // Build notes with vibe context
-      const noteParts: string[] = [];
-      if (item.vibeNotes) noteParts.push(item.vibeNotes);
-      if (item.travelFromPrevious?.description) noteParts.push(`Getting there: ${item.travelFromPrevious.description}`);
-      if (item.priceCategory) noteParts.push(`Price tier: ${item.priceCategory}`);
-      if (matchedReal) noteParts.push(`Ranked #${rankedEvents.indexOf(matchedReal) + 1} (score: ${matchedReal.score})`);
-
-      const itineraryItem: ItineraryItem = {
-        id: itemId,
-        event,
-        scheduledTime: {
-          start: startDatetime,
-          end: endDatetime,
-        },
-        travelTimeFromPrevious: travelMinutes > 0 ? travelMinutes : undefined,
-        travelMode,
-        status: 'planned',
-        notes: noteParts.length > 0 ? noteParts.join(' | ') : undefined,
-      };
-
-      itineraryItems.push(itineraryItem);
+      prevEndMinutes = result.endMinutes;
+      itineraryItems.push(result.itineraryItem);
       totalCostPerPerson += item.estimatedCostPerPerson;
-      totalDurationMinutes += item.durationMinutes + travelMinutes;
+      totalDurationMinutes += item.durationMinutes + (item.travelFromPrevious?.durationMinutes ?? 0);
     }
 
+    // ── Step 3b: Sort + validate total span ──
+    validateTimeSequencing(itineraryItems, warnings);
 
-    // ── Step 3b: Sort items chronologically and validate total span ──
-    itineraryItems.sort((a, b) =>
-      new Date(a.scheduledTime.start).getTime() - new Date(b.scheduledTime.start).getTime()
-    );
-
-    if (itineraryItems.length >= 2) {
-      const firstStart = new Date(itineraryItems[0].scheduledTime.start).getTime();
-      const lastEnd = new Date(itineraryItems[itineraryItems.length - 1].scheduledTime.end).getTime();
-      const totalSpanHours = (lastEnd - firstStart) / (1000 * 60 * 60);
-      if (totalSpanHours > MAX_PLAN_SPAN_HOURS) {
-        warnings.push(`Plan span too long: ${totalSpanHours.toFixed(1)} hours from first activity to last (max recommended: ${MAX_PLAN_SPAN_HOURS}h)`);
-        console.log(`[plan-itinerary] ⚠️ Plan spans ${totalSpanHours.toFixed(1)}h — exceeds ${MAX_PLAN_SPAN_HOURS}h recommendation`);
-      }
-      console.log(`[plan-itinerary] Total plan span: ${totalSpanHours.toFixed(1)} hours (${formatTime(parseTime(extractTimeFromISO(itineraryItems[0].scheduledTime.start)))} – ${formatTime(parseTime(extractTimeFromISO(itineraryItems[itineraryItems.length - 1].scheduledTime.end)))})`);
-    }
     // ── Step 4: Budget validation ──
-    if (budgetMax != null) {
-      if (totalCostPerPerson > budgetMax * 1.2) {
-        warnings.push(`Budget overrun: estimated $${totalCostPerPerson}/person exceeds $${budgetMax} budget by $${totalCostPerPerson - budgetMax}`);
-      } else if (totalCostPerPerson > budgetMax) {
-        warnings.push(`Slightly over budget: estimated $${totalCostPerPerson}/person vs $${budgetMax} budget`);
-      }
-    }
+    validateBudget(totalCostPerPerson, budgetMax, warnings);
 
     // ── Step 5: Build the final Itinerary ──
-    // Count from actual itinerary items (after trimming and time boundary drops)
     const mainEventCount = itineraryItems.filter(item => item.event.source !== 'planned').length;
     const generatedCount = itineraryItems.length - mainEventCount;
-
     const totalCost = totalCostPerPerson * partySize;
 
     const itinerary: Itinerary = {
