@@ -7,7 +7,7 @@ import { workflowRouter } from './routes/workflow.js';
 import { tracesRouter } from './routes/traces.js';
 import { eventsRouter } from './routes/events.js';
 import { itinerariesRouter } from './routes/itineraries.js';
-import { connectMongo } from '@/mongodb/index.js';
+import { connectMongo } from '../mongodb/index.js';
 
 const app = express();
 

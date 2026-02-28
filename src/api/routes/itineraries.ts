@@ -4,7 +4,7 @@ import {
   requireAuth,
   type AuthenticatedRequest,
 } from '../middleware/auth.js';
-import ItineraryModel from '@/mongodb/models/Itinerary.js';
+import ItineraryModel from '../../mongodb/models/Itinerary.js';
 
 const router = Router();
 

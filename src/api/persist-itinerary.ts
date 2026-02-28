@@ -11,8 +11,8 @@
  * for fast per-user queries.
  */
 
-import ItineraryModel from '@/mongodb/models/Itinerary.js';
-import type { IEventSnapshot } from '@/mongodb/models/Itinerary.js';
+import ItineraryModel from '../mongodb/models/Itinerary.js';
+import type { IEventSnapshot } from '../mongodb/models/Itinerary.js';
 import type { Itinerary, Event } from '../types/index.js';
 
 /**
