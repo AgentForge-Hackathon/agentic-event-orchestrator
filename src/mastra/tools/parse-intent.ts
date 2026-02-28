@@ -2,9 +2,6 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 
 import {
-  type PlanFormData,
-  type UserConstraints,
-  type UserIntent,
   UserConstraintsSchema,
   mapPlanFormToConstraints,
   PlanFormDataSchema,
@@ -25,7 +22,7 @@ export const parseIntentTool = createTool({
     'Parses structured plan form data into user constraints. Maps occasion, budget, party size, date, time, duration, and areas into domain-specific constraints for the planning pipeline.',
   inputSchema: z.object({
     formData: PlanFormDataSchema,
-    userQuery: z.string().optional().default(''),
+    userQuery: z.string().optional().default('').describe('(unused) Intent is derived from formData'),
   }),
   outputSchema: z.object({
     intentType: z.enum([
@@ -35,20 +32,18 @@ export const parseIntentTool = createTool({
       'book_specific',
       'modify_plan',
     ]),
-    constraints: z.record(z.any()),
+    constraints: UserConstraintsSchema.partial(),
     naturalLanguageSummary: z.string(),
-    formData: z.record(z.any()),
+    formData: PlanFormDataSchema,
   }),
-  execute: async (inputData) => {
-    const { formData, userQuery } = inputData;
-
+  execute: async ({ formData }) => {
     const mapped = mapPlanFormToConstraints(formData);
 
     return {
       intentType: mapped.intentType,
-      constraints: mapped.constraints as Record<string, unknown>,
+      constraints: mapped.constraints,
       naturalLanguageSummary: mapped.naturalLanguageSummary,
-      formData: formData as unknown as Record<string, unknown>,
+      formData,
     };
   },
 });
