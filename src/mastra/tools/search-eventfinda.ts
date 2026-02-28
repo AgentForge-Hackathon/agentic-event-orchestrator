@@ -2,10 +2,14 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { EventCategorySchema } from '../../types/index.js';
 import type { Event, EventCategory } from '../../types/index.js';
-import {
-  inferCategoryFromEventFinda,
-  CATEGORY_TO_EVENTFINDA_SLUG,
-} from './utils/category.js';
+
+import { resolveEndDate } from './utils/date-range.js';
+import { buildSearchResult } from './utils/event-filters.js';
+import { getEventfindaDemoEvents } from './utils/demo-data.js';
+import { CATEGORY_TO_EVENTFINDA_SLUG } from './utils/category.js';
+import { fetchWithRetry } from './utils/http.js';
+import { mapEventFindaToEvent } from './utils/eventfinda-mapper.js';
+import type { EventFindaApiResponse } from './utils/eventfinda-types.js';
 
 // ============================================
 // EventFinda API Configuration
@@ -21,160 +25,6 @@ import {
  * Max rows per request: 20
  */
 const EVENTFINDA_API_BASE = 'https://api.eventfinda.sg/v2';
-
-// Singapore center point for distance-based queries
-const SINGAPORE_CENTER = { lat: 1.3521, lng: 103.8198 };
-
-// ============================================
-// Retry Configuration
-// ============================================
-
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1100; // >1s to respect 1 req/sec rate limit
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Wraps a fetch call with retry logic and exponential backoff.
- * Specifically handles:
- *   - 429 Too Many Requests (rate limited) — waits longer
- *   - 5xx Server Errors — retries with backoff
- *   - Network errors — retries with backoff
- */
-async function fetchWithRetry(
-  url: string,
-  init: RequestInit,
-  retries = MAX_RETRIES,
-): Promise<Response> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const response = await fetch(url, init);
-
-      // Success — return immediately
-      if (response.ok) return response;
-
-      // Rate limited — wait and retry
-      if (response.status === 429) {
-        const retryAfter = response.headers.get('Retry-After');
-        const waitMs = retryAfter
-          ? parseInt(retryAfter, 10) * 1000
-          : BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[eventfinda] Rate limited (429), retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
-        await sleep(waitMs);
-        continue;
-      }
-
-      // Server error — retry with backoff
-      if (response.status >= 500) {
-        const waitMs = BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[eventfinda] Server error (${response.status}), retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
-        await sleep(waitMs);
-        continue;
-      }
-
-      // Client error (4xx, not 429) — don't retry, throw immediately
-      const errorText = await response.text();
-      throw new Error(
-        `EventFinda API request failed (${response.status}): ${errorText}`,
-      );
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith('EventFinda API request failed')) {
-        throw error; // Re-throw non-retryable client errors
-      }
-      lastError = error instanceof Error ? error : new Error(String(error));
-      if (attempt < retries) {
-        const waitMs = BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[eventfinda] Network error, retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries}): ${lastError?.message}`);
-        await sleep(waitMs);
-      }
-    }
-  }
-
-  throw lastError ?? new Error('EventFinda API request failed after retries');
-}
-
-// ============================================
-// EventFinda API Types
-// ============================================
-
-interface EventFindaSession {
-  timezone?: string;
-  datetime_start?: string;
-  datetime_end?: string;
-  is_cancelled?: boolean;
-}
-
-interface EventFindaCategory {
-  id?: number;
-  name?: string;
-  url_slug?: string;
-}
-
-interface EventFindaLocation {
-  id?: number;
-  name?: string;
-  summary?: string;
-}
-
-interface EventFindaImage {
-  id?: number;
-  transforms?: {
-    transforms?: Array<{
-      url?: string;
-      width?: number;
-      height?: number;
-    }>;
-  };
-}
-
-interface EventFindaTicketType {
-  name?: string;
-  price?: string;
-  is_free?: boolean;
-}
-
-interface EventFindaEvent {
-  id?: number;
-  name?: string;
-  description?: string;
-  url?: string;
-  url_slug?: string;
-  address?: string;
-  location_summary?: string;
-  datetime_start?: string;
-  datetime_end?: string;
-  datetime_summary?: string;
-  is_free?: boolean;
-  is_featured?: boolean;
-  is_cancelled?: boolean;
-  restrictions?: string;
-  point?: {
-    lat?: number;
-    lng?: number;
-  };
-  category?: EventFindaCategory;
-  location?: EventFindaLocation;
-  images?: {
-    images?: EventFindaImage[];
-  };
-  sessions?: {
-    sessions?: EventFindaSession[];
-  };
-  ticket_types?: {
-    ticket_types?: EventFindaTicketType[];
-  };
-}
-
-interface EventFindaApiResponse {
-  '@attributes'?: {
-    count?: number;
-  };
-  events?: EventFindaEvent[];
-}
 
 // ============================================
 // API Client
@@ -253,164 +103,6 @@ async function fetchEventFindaEvents(params: {
 }
 
 // ============================================
-// Event Mapper
-// ============================================
-
-function mapEventFindaToEvent(raw: EventFindaEvent): Event | null {
-  if (!raw.name || !raw.url) return null;
-  if (raw.is_cancelled) return null;
-
-  // Parse dates
-  const startDate = raw.datetime_start
-    ? new Date(raw.datetime_start).toISOString()
-    : new Date().toISOString();
-  const endDate = raw.datetime_end
-    ? new Date(raw.datetime_end).toISOString()
-    : new Date(Date.parse(startDate) + 2 * 60 * 60 * 1000).toISOString();
-
-  // Extract price from ticket_types
-  let price: Event['price'] | undefined;
-  const ticketTypes = raw.ticket_types?.ticket_types;
-  if (ticketTypes?.length && !raw.is_free) {
-    const prices = ticketTypes
-      .map((tt) => parseFloat(tt.price ?? ''))
-      .filter((p) => !isNaN(p) && p > 0);
-
-    if (prices.length > 0) {
-      price = {
-        min: Math.min(...prices),
-        max: Math.max(...prices),
-        currency: 'SGD',
-      };
-    }
-  }
-
-  if (raw.is_free) {
-    price = { min: 0, max: 0, currency: 'SGD' };
-  }
-
-  // Extract image URL (first transform of first image)
-  let imageUrl: string | undefined;
-  const firstImage = raw.images?.images?.[0];
-  if (firstImage?.transforms?.transforms?.length) {
-    imageUrl = firstImage.transforms.transforms[0].url;
-  }
-
-  // Location
-  const lat = raw.point?.lat ?? SINGAPORE_CENTER.lat;
-  const lng = raw.point?.lng ?? SINGAPORE_CENTER.lng;
-  const locationName = raw.location?.name ?? raw.location_summary ?? 'Singapore';
-  const address = raw.address ?? raw.location_summary ?? 'Singapore';
-
-  // Category inference — prefer EventFinda's own category, fall back to keywords
-  const efCategorySlug = raw.category?.url_slug;
-  const category = inferCategoryFromEventFinda(raw.name, raw.description, efCategorySlug);
-
-  return {
-    id: `ef_${raw.id ?? Math.random().toString(36).slice(2)}`,
-    name: raw.name,
-    description: (raw.description ?? '').slice(0, 500),
-    category,
-    location: {
-      name: locationName,
-      address,
-      lat,
-      lng,
-    },
-    timeSlot: {
-      start: startDate,
-      end: endDate,
-    },
-    price,
-    sourceUrl: raw.url,
-    source: 'eventfinda',
-    imageUrl,
-    availability: 'unknown',
-    bookingRequired: !raw.is_free,
-  };
-}
-
-// ============================================
-// Demo / Fallback Data
-// ============================================
-
-function getDemoEvents(date: string): Event[] {
-  const baseDate = date || new Date().toISOString().split('T')[0];
-  return [
-    {
-      id: 'ef_demo_1',
-      name: 'Singapore Comedy Night',
-      description: 'An evening of stand-up comedy featuring top local and international comedians at the Arts House.',
-      category: 'theatre',
-      location: { name: 'The Arts House', address: '1 Old Parliament Lane, Singapore 179429', lat: 1.2884, lng: 103.8508 },
-      timeSlot: { start: `${baseDate}T19:30:00.000Z`, end: `${baseDate}T22:00:00.000Z` },
-      price: { min: 25, max: 40, currency: 'SGD' },
-      rating: 4.4,
-      sourceUrl: 'https://www.eventfinda.sg/comedy-night',
-      source: 'eventfinda',
-      availability: 'available',
-      bookingRequired: true,
-    },
-    {
-      id: 'ef_demo_2',
-      name: 'Artisan Craft Market @ Haji Lane',
-      description: 'Browse unique handmade crafts, local art, and artisanal food at this vibrant street market.',
-      category: 'exhibition',
-      location: { name: 'Haji Lane', address: 'Haji Lane, Singapore 189241', lat: 1.3017, lng: 103.8593 },
-      timeSlot: { start: `${baseDate}T10:00:00.000Z`, end: `${baseDate}T18:00:00.000Z` },
-      price: { min: 0, max: 0, currency: 'SGD' },
-      rating: 4.2,
-      sourceUrl: 'https://www.eventfinda.sg/artisan-market',
-      source: 'eventfinda',
-      availability: 'available',
-      bookingRequired: false,
-    },
-    {
-      id: 'ef_demo_3',
-      name: 'Sunset Yoga at Marina Barrage',
-      description: 'Unwind with a relaxing sunset yoga session overlooking the Marina Bay skyline.',
-      category: 'sports',
-      location: { name: 'Marina Barrage', address: '8 Marina Gardens Dr, Singapore 018951', lat: 1.2808, lng: 103.8713 },
-      timeSlot: { start: `${baseDate}T17:30:00.000Z`, end: `${baseDate}T19:00:00.000Z` },
-      price: { min: 15, max: 15, currency: 'SGD' },
-      rating: 4.6,
-      sourceUrl: 'https://www.eventfinda.sg/sunset-yoga',
-      source: 'eventfinda',
-      availability: 'available',
-      bookingRequired: true,
-    },
-    {
-      id: 'ef_demo_4',
-      name: 'Local Beats: Indie Music Showcase',
-      description: 'Discover Singapore\'s best indie bands and solo artists at this intimate live music event.',
-      category: 'concert',
-      location: { name: 'Esplanade Annexe Studio', address: '1 Esplanade Dr, Singapore 038981', lat: 1.2899, lng: 103.8556 },
-      timeSlot: { start: `${baseDate}T20:00:00.000Z`, end: `${baseDate}T23:00:00.000Z` },
-      price: { min: 20, max: 35, currency: 'SGD' },
-      rating: 4.5,
-      sourceUrl: 'https://www.eventfinda.sg/indie-music',
-      source: 'eventfinda',
-      availability: 'limited',
-      bookingRequired: true,
-    },
-    {
-      id: 'ef_demo_5',
-      name: 'Weekend Pottery Workshop',
-      description: 'Hands-on pottery making for beginners. Create your own ceramic bowl or mug to take home.',
-      category: 'workshop',
-      location: { name: 'Thow Kwang Pottery Jungle', address: '85 Lorong Tawas, Singapore 639823', lat: 1.3312, lng: 103.7195 },
-      timeSlot: { start: `${baseDate}T10:00:00.000Z`, end: `${baseDate}T13:00:00.000Z` },
-      price: { min: 60, max: 80, currency: 'SGD' },
-      rating: 4.7,
-      sourceUrl: 'https://www.eventfinda.sg/pottery-workshop',
-      source: 'eventfinda',
-      availability: 'available',
-      bookingRequired: true,
-    },
-  ];
-}
-
-// ============================================
 // Tool Definition
 // ============================================
 
@@ -442,45 +134,23 @@ export const searchEventfindaTool = createTool({
 
     if (!username || !password) {
       console.log('[eventfinda] No credentials — using demo data');
-      let events = getDemoEvents(input.date);
-
-      if (input.budgetMax !== undefined) {
-        events = events.filter(
-          (e) => !e.price || e.price.min <= input.budgetMax!,
-        );
-      }
-
-      if (input.categories?.length) {
-        events = events.filter((e) => input.categories!.includes(e.category));
-      }
-
-      return {
-        events: events.slice(0, input.maxResults ?? 20),
-        source: 'eventfinda',
-        searchDuration: Date.now() - startTime,
-        mode: 'demo' as const,
-      };
+      return buildSearchResult(
+        getEventfindaDemoEvents(input.date),
+        'eventfinda', startTime, 'demo',
+        { budgetMax: input.budgetMax, categories: input.categories, maxResults: input.maxResults },
+      );
     }
 
     try {
       // Build category slugs from our categories
-      const categorySlugs: string[] = [];
-      if (input.categories?.length) {
-        for (const cat of input.categories) {
-          const slug = CATEGORY_TO_EVENTFINDA_SLUG[cat as EventCategory];
-          if (slug && !categorySlugs.includes(slug)) {
-            categorySlugs.push(slug);
-          }
-        }
-      }
+      const categorySlugs = (input.categories ?? [])
+        .map((cat) => CATEGORY_TO_EVENTFINDA_SLUG[cat as EventCategory])
+        .filter((slug): slug is string => !!slug)
+        .filter((slug, i, arr) => arr.indexOf(slug) === i);
 
       // Build date range
       const startDate = input.date;
-      const endDate = input.dateEnd ?? (() => {
-        const d = new Date(input.date);
-        d.setDate(d.getDate() + 3);
-        return d.toISOString().split('T')[0];
-      })();
+      const endDate = resolveEndDate(input.date, input.dateEnd);
 
       console.log(`[eventfinda] Search: ${startDate}→${endDate}, categories: ${categorySlugs.join(', ') || 'all'}, budget: ${input.budgetMax ?? 'unlimited'}`);
 
@@ -498,42 +168,23 @@ export const searchEventfindaTool = createTool({
       const rawEvents = response.events ?? [];
 
       console.log(`[eventfinda] API returned ${rawEvents.length} events (${totalCount} total)`);
-      // Map to our Event type
-      let events: Event[] = rawEvents
+
+      const events: Event[] = rawEvents
         .map(mapEventFindaToEvent)
         .filter((e): e is Event => e !== null);
 
-      // Post-filter by budget (API price_max may not cover all cases)
-      if (input.budgetMax !== undefined) {
-        events = events.filter(
-          (e) => !e.price || e.price.min <= input.budgetMax!,
-        );
-      }
-
-      // Post-filter by our categories (EventFinda slugs are coarser)
-      if (input.categories?.length) {
-        events = events.filter((e) => input.categories!.includes(e.category));
-      }
-
-      return {
-        events: events.slice(0, input.maxResults ?? 20),
-        source: 'eventfinda',
-        searchDuration: Date.now() - startTime,
-        mode: 'live' as const,
-      };
+      return buildSearchResult(
+        events, 'eventfinda', startTime, 'live',
+        { budgetMax: input.budgetMax, categories: input.categories, maxResults: input.maxResults },
+      );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-
       console.error(`[eventfinda] Error: ${errorMessage}`);
-      // Fallback to demo data on failure
-      const events = getDemoEvents(input.date);
-      return {
-        events: events.slice(0, input.maxResults ?? 20),
-        source: 'eventfinda',
-        searchDuration: Date.now() - startTime,
-        mode: 'demo' as const,
-        error: errorMessage,
-      };
+      return buildSearchResult(
+        getEventfindaDemoEvents(input.date),
+        'eventfinda', startTime, 'demo',
+        { maxResults: input.maxResults, error: errorMessage },
+      );
     }
   },
 });

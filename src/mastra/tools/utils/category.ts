@@ -105,8 +105,25 @@ export function inferCategory(name: string, description?: string): EventCategory
 }
 
 // ============================================
-// EventFinda Category Reverse Map
+// Source-Specific Category Mappings
 // ============================================
+
+/**
+ * Maps our EventCategory → Eventbrite URL path keyword.
+ * Used to construct Eventbrite search URLs.
+ */
+export const CATEGORY_TO_EVENTBRITE_KEYWORD: Partial<Record<EventCategory, string>> = {
+  concert: 'music',
+  theatre: 'performing-visual-arts',
+  sports: 'sports-fitness',
+  dining: 'food-drink',
+  nightlife: 'nightlife',
+  outdoor: 'travel-outdoor',
+  cultural: 'performing-visual-arts',
+  workshop: 'business',
+  exhibition: 'performing-visual-arts',
+  festival: 'music',
+};
 
 /**
  * Maps our internal EventCategory → EventFinda API category_slug.
