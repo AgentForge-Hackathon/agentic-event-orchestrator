@@ -171,11 +171,11 @@ export function PipelineProgress({ events }: PipelineProgressProps) {
           );
 
           const stepContent = (
-            <div className="flex flex-col items-center" role="listitem">
+            <div className="flex flex-col items-center w-20" role="listitem">
               {iconNode}
-              <div className="flex flex-col items-center mt-1.5">
+              <div className="flex flex-col items-center mt-1.5 w-full">
                 <span
-                  className={`text-xs font-medium leading-tight ${
+                  className={`text-xs font-medium leading-tight text-center ${
                     isDone
                       ? 'text-green-600 dark:text-green-400'
                       : isActive
@@ -193,7 +193,7 @@ export function PipelineProgress({ events }: PipelineProgressProps) {
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: 'auto' }}
                       exit={{ opacity: 0, height: 0 }}
-                      className={`text-[10px] leading-tight text-center ${
+                      className={`text-[10px] leading-snug text-center w-full ${
                         isActive ? 'text-primary/70' : 'text-muted-foreground'
                       }`}
                     >
