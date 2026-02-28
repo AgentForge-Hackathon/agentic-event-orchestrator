@@ -6,7 +6,13 @@ import type {
   SpanType,
 } from '@mastra/core/observability';
 
-import { traceEventBus, type TraceEvent } from './sse-exporter.js';
+import {
+  traceEventBus,
+  type TraceEvent,
+  type PipelineStep,
+  type ReasoningStep,
+  type Decision,
+} from './sse-exporter.js';
 
 /**
  * Maps a Mastra SpanType enum value to our simplified TraceEvent type string.
@@ -92,20 +98,17 @@ function extractMetadata(
     if ('outputSummary' in spanMeta && typeof spanMeta.outputSummary === 'string') {
       meta.outputSummary = spanMeta.outputSummary;
     }
-    if ('eventCount' in spanMeta && typeof spanMeta.eventCount === 'number') {
-      meta.eventCount = spanMeta.eventCount;
-    }
     if ('resultCount' in spanMeta && typeof spanMeta.resultCount === 'number') {
       meta.resultCount = spanMeta.resultCount;
     }
     if ('pipelineStep' in spanMeta && typeof spanMeta.pipelineStep === 'string') {
-      meta.pipelineStep = spanMeta.pipelineStep as TraceEvent['metadata'] extends { pipelineStep?: infer P } ? P : never;
+      meta.pipelineStep = spanMeta.pipelineStep as PipelineStep;
     }
     if ('reasoningSteps' in spanMeta && Array.isArray(spanMeta.reasoningSteps)) {
-      meta.reasoningSteps = spanMeta.reasoningSteps as TraceEvent['metadata'] extends { reasoningSteps?: infer R } ? R : never;
+      meta.reasoningSteps = spanMeta.reasoningSteps as ReasoningStep[];
     }
     if ('decisions' in spanMeta && Array.isArray(spanMeta.decisions)) {
-      meta.decisions = spanMeta.decisions as TraceEvent['metadata'] extends { decisions?: infer D } ? D : never;
+      meta.decisions = spanMeta.decisions as Decision[];
     }
   }
 

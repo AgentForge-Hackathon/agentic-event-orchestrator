@@ -6,6 +6,11 @@ import type { Event, EventCategory } from '../../types/index.js';
 
 const router = Router();
 
+// Tools are invoked directly here, outside of a Mastra workflow runtime.
+// These implementations don't use the runtime context parameter.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DIRECT_TOOL_CTX = {} as any;
+
 // ---------------------------------------------------------------------------
 // In-memory cache (5-minute TTL)
 // ---------------------------------------------------------------------------
@@ -93,15 +98,10 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
     : undefined;
 
   // Run both discovery tools in parallel
+  const toolInput = { date: dateStr, dateEnd: dateEndStr, categories: parsedCategories, budgetMax: budgetMaxNum, maxResults: 20 };
   const [eventbriteResult, eventfindaResult] = await Promise.allSettled([
-    searchEventbriteTool.execute!(
-      { date: dateStr, dateEnd: dateEndStr, categories: parsedCategories, budgetMax: budgetMaxNum, maxResults: 20 },
-      {} as any,
-    ),
-    searchEventfindaTool.execute!(
-      { date: dateStr, dateEnd: dateEndStr, categories: parsedCategories, budgetMax: budgetMaxNum, maxResults: 20 },
-      {} as any,
-    ),
+    searchEventbriteTool.execute!(toolInput, DIRECT_TOOL_CTX),
+    searchEventfindaTool.execute!(toolInput, DIRECT_TOOL_CTX),
   ]);
 
   // Merge and deduplicate by sourceUrl

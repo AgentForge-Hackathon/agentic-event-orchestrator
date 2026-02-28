@@ -1,7 +1,7 @@
-import mongoose from "mongoose";
-import { env } from "@/config";
+import mongoose from 'mongoose';
+import { env } from '@/config.js';
 
-export const connectMongo = async () => {
+export async function connectMongo(): Promise<void> {
   await mongoose.connect(env.MONGO_URI);
-  console.log("✅ MongoDB Connected");
-};
+  console.log('✅ MongoDB Connected');
+}
