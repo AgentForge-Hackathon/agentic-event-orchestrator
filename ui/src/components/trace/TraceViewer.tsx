@@ -1,10 +1,11 @@
 import { useMemo, useEffect, useRef, useState, useCallback } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
 import { toast } from 'sonner';
 import type { TraceEvent } from '@/types/trace';
 import { useTraceStream } from '@/hooks/useTraceStream';
 import { apiClient } from '@/lib/apiClient';
+import { Button } from '@/components/ui/button';
 import { PipelineProgress } from './PipelineProgress';
 import { SpanCard } from './SpanCard';
 import { ActiveAgentBanner } from './ActiveAgentBanner';
@@ -114,13 +115,8 @@ export function TraceViewer({ workflowId, onComplete }: TraceViewerProps) {
     }
   }, [approvalResolved, approvalDecision]);
 
-  // Auto-navigate after pipeline completes with an approved plan
-  useEffect(() => {
-    if (status === 'done' && approvalDecision === 'approved' && onComplete) {
-      const timer = setTimeout(onComplete, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [status, approvalDecision, onComplete]);
+  // Pipeline completed with approved plan — show continue button
+  const showContinueButton = status === 'done' && approvalDecision === 'approved' && !!onComplete;
 
   const showApprovalCard = !!approvalEvent && !approvalResolved && approvalDecision === null;
   const showResolvedCard = !!approvalEvent && (!!approvalResolved || approvalDecision !== null);
@@ -253,7 +249,7 @@ export function TraceViewer({ workflowId, onComplete }: TraceViewerProps) {
             <span className="text-primary font-medium">Agents working...</span>
           </>
         )}
-        {status === 'done' && (
+        {status === 'done' && !showContinueButton && (
           <>
             <CheckCircle2 className="h-4 w-4 text-green-500" aria-hidden="true" />
             <span className="text-green-600 dark:text-green-400 font-medium">
@@ -261,6 +257,12 @@ export function TraceViewer({ workflowId, onComplete }: TraceViewerProps) {
               {resultCount != null && ` — ${resultCount} results found`}
             </span>
           </>
+        )}
+        {showContinueButton && (
+          <Button onClick={onComplete} size="default" className="gap-2">
+            View Itineraries
+            <ArrowRight className="h-4 w-4" aria-hidden="true" />
+          </Button>
         )}
         {status === 'error' && (
           <>
