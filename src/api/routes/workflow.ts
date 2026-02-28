@@ -149,7 +149,7 @@ router.post(
   '/:workflowId/approve',
   requireAuth,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-    const workflowId = req.params.workflowId;
+    const workflowId = req.params.workflowId as string;
     const { approved } = req.body as { approved?: boolean };
 
     if (typeof approved !== 'boolean') {
