@@ -10,11 +10,11 @@ import {
 } from '@/components/ui/tooltip';
 
 const STEPS: { key: PipelineStep; label: string; agentName: string; icon: typeof Brain }[] = [
-  { key: 'intent', label: 'Understand', agentName: 'Understanding your preferences', icon: Brain },
-  { key: 'discovery', label: 'Search', agentName: 'Searching for events', icon: Search },
-  { key: 'recommendation', label: 'Curate', agentName: 'Curating top picks', icon: Star },
-  { key: 'planning', label: 'Plan', agentName: 'Building your itinerary', icon: Calendar },
-  { key: 'execution', label: 'Book', agentName: 'Making your bookings', icon: Rocket },
+  { key: 'intent', label: 'Intent', agentName: 'Intent Agent', icon: Brain },
+  { key: 'discovery', label: 'Discovery', agentName: 'Discovery Agent', icon: Search },
+  { key: 'recommendation', label: 'Ranking', agentName: 'Recommendation Agent', icon: Star },
+  { key: 'planning', label: 'Planning', agentName: 'Planning Agent', icon: Calendar },
+  { key: 'execution', label: 'Execution', agentName: 'Execution Agent', icon: Rocket },
 ];
 
 type StepStatus = 'pending' | 'running' | 'completed' | 'error';
