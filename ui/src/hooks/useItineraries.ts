@@ -48,6 +48,8 @@ export interface Itinerary {
   createdBy: string;
   /** AI-generated plan name / summary sentence. */
   summary?: string | null;
+  /** ISO 8601 date string for the planned day, e.g. "2026-03-15T00:00:00.000Z". */
+  plannedDate?: string | null;
   items: ItineraryItem[];
   totalCost?: EventPrice;
   /** ISO timestamp — added automatically by Mongoose `timestamps: true`. */
