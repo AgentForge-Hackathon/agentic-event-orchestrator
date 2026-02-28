@@ -1,6 +1,6 @@
 import { getToken } from "./tokenStorage";
 
-const BASE_URL = "/api";
+const BASE_URL = (import.meta.env.VITE_API_URL ?? "") + "/api";
 
 interface ApiResponse<T> {
   data: T | null;
