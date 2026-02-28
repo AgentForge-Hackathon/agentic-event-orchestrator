@@ -1,4 +1,5 @@
 import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { env } from '../config.js';
 import { authRouter } from './routes/auth.js';
@@ -41,6 +42,16 @@ app.use('/api/workflow', workflowRouter);
 app.use('/api/events', eventsRouter);
 app.use('/api/itineraries', itinerariesRouter);
 app.use('/api/traces', tracesRouter);
+
+// ---------------------
+// Global error handler
+// ---------------------
+// Must have 4 params for Express to treat it as an error-handling middleware.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[server] Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 // ---------------------
 // Start server

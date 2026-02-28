@@ -6,8 +6,12 @@
  * Acontext failures are caught and logged — they never interrupt the workflow.
  * Falls back to pure in-memory when ACONTEXT_API_KEY is unset.
  *
+ * Architecture:
+ *   AcontextPersister — encapsulates all Acontext session/message logic (Acontext layer)
+ *   ContextManager    — in-memory state management, delegates persistence to above (cache layer)
+ *
  * Acontext session layout (one per workflow run):
- *   Each state mutation appends a role:"system" OpenAI message tagged with
+ *   Each state mutation appends a role:"assistant" OpenAI message tagged with
  *   meta.type (e.g. "phase_transition", "agent_state_updated"), making the full
  *   workflow trajectory inspectable in the Acontext Dashboard.
  */
@@ -43,24 +47,18 @@ export interface WorkflowPhase {
   output?: unknown;
 }
 
-export class ContextManager {
+// ── Acontext layer ────────────────────────────────────────────────────────────
+
+/**
+ * Handles fire-and-forget persistence to Acontext.
+ * Isolated from the cache layer so ContextManager doesn't need Acontext internals.
+ */
+class AcontextPersister {
   private sessionId: string | null = null;
   private workflowId: string | null = null;
-
-  /**
-   * Acontext session UUID — distinct from workflowId.
-   * Only available after initializeWorkflow's async session creation completes.
-   * Do not read this synchronously right after initializeWorkflow; it may still be null.
-   */
-  private acontextSessionId: string | null = null;
-
-  private localState: Map<string, unknown> = new Map();
-  private readonly config: ContextConfig;
   private readonly client?: AcontextClient;
 
   constructor(config?: ContextConfig) {
-    this.config = config ?? {};
-
     const apiKey = config?.apiKey ?? process.env['ACONTEXT_API_KEY'];
     const baseUrl = config?.baseUrl ?? process.env['ACONTEXT_BASE_URL'];
 
@@ -72,6 +70,93 @@ export class ContextManager {
     } else {
       console.log('[context] ACONTEXT_API_KEY not set — running in-memory only');
     }
+  }
+
+  get sessionUUID(): string | null {
+    return this.sessionId;
+  }
+
+  /**
+   * Create an Acontext session for this workflow run.
+   * Runs asynchronously — callers should `void` this and not await it.
+   */
+  async initSession(
+    userId: string,
+    workflowId: string,
+    initialState: WorkflowState,
+  ): Promise<void> {
+    this.workflowId = workflowId;
+    if (!this.client) return;
+
+    try {
+      const session = await this.client.sessions.create({
+        user: userId,
+        configs: { workflowId },
+        // Disable auto-extraction: we publish structured trace events via TraceEventBus
+        // and don't want Acontext parsing state snapshots as conversational tasks.
+        disableTaskTracking: true,
+      });
+      this.sessionId = session.id;
+      console.log(
+        `[context] Acontext session ${session.id} created for workflow ${workflowId}`,
+      );
+      await this.persist('workflow_initialized', initialState);
+    } catch (err) {
+      console.warn(
+        '[context] Acontext session creation failed — continuing in-memory only:',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  /**
+   * Append a structured event message to the Acontext session.
+   * No-ops silently when Acontext is unconfigured or the session hasn't initialised yet.
+   */
+  async persist(eventType: string, payload: unknown, currentPhase?: string): Promise<void> {
+    if (!this.client || !this.sessionId) return;
+
+    try {
+      await this.client.sessions.storeMessage(
+        this.sessionId,
+        { role: 'assistant', content: JSON.stringify(payload) },
+        {
+          format: 'openai',
+          meta: {
+            type: eventType,
+            workflowId: this.workflowId,
+            phase: currentPhase ?? 'unknown',
+            timestamp: new Date().toISOString(),
+          },
+        },
+      );
+    } catch (err) {
+      console.warn(
+        `[context] Acontext persist "${eventType}" failed — state preserved in-memory:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+}
+
+// ── Cache layer ───────────────────────────────────────────────────────────────
+
+export class ContextManager {
+  private sessionId: string | null = null;
+  private workflowId: string | null = null;
+  private readonly localState: Map<string, unknown> = new Map();
+  private readonly persister: AcontextPersister;
+
+  constructor(config?: ContextConfig) {
+    this.persister = new AcontextPersister(config);
+  }
+
+  /**
+   * Returns the Acontext session UUID for this run, or null if Acontext is
+   * unconfigured or session creation hasn't completed yet (it runs asynchronously).
+   */
+  getAcontextSessionId(): string | null {
+    return this.persister.sessionUUID;
   }
 
   async initializeWorkflow(
@@ -93,7 +178,7 @@ export class ContextManager {
     this.localState.set('agents', new Map<string, AgentStateUpdate>());
     this.localState.set('phases', [] as WorkflowPhase[]);
 
-    void this.initAcontextSession(userId, initialState);
+    void this.persister.initSession(userId, this.workflowId, initialState);
 
     return this.workflowId;
   }
@@ -122,7 +207,7 @@ export class ContextManager {
     this.localState.set('workflow', workflow);
     this.localState.set('phases', phases);
 
-    void this.persistEvent('phase_transition', {
+    this.persist('phase_transition', {
       fromPhase: previousPhase,
       toPhase: phase,
       output: output ?? null,
@@ -134,7 +219,7 @@ export class ContextManager {
     const agents = this.localState.get('agents') as Map<string, AgentStateUpdate>;
     agents.set(update.agentId, update);
     this.localState.set('agents', agents);
-    void this.persistEvent('agent_state_updated', update);
+    this.persist('agent_state_updated', update);
   }
 
   async storeDiscoveredEvents(events: Event[]): Promise<void> {
@@ -143,7 +228,7 @@ export class ContextManager {
     workflow.updatedAt = new Date().toISOString();
     this.localState.set('workflow', workflow);
 
-    void this.persistEvent('events_discovered', {
+    this.persist('events_discovered', {
       eventCount: events.length,
       eventSummaries: events.slice(0, 10).map((e) => ({
         id: e.id,
@@ -161,7 +246,7 @@ export class ContextManager {
     workflow.updatedAt = new Date().toISOString();
     this.localState.set('workflow', workflow);
 
-    void this.persistEvent('events_ranked', {
+    this.persist('events_ranked', {
       rankedCount: events.length,
       topPicks: events.slice(0, 3).map((e) => ({ id: e.id, name: e.name })),
       workflowState: workflow,
@@ -173,7 +258,7 @@ export class ContextManager {
     workflow.itinerary = itinerary;
     workflow.updatedAt = new Date().toISOString();
     this.localState.set('workflow', workflow);
-    void this.persistEvent('itinerary_planned', { workflowState: workflow });
+    this.persist('itinerary_planned', { workflowState: workflow });
   }
 
   async storeBookingActions(actions: BookingAction[]): Promise<void> {
@@ -181,7 +266,7 @@ export class ContextManager {
     workflow.bookingActions = actions;
     workflow.updatedAt = new Date().toISOString();
     this.localState.set('workflow', workflow);
-    void this.persistEvent('bookings_executed', {
+    this.persist('bookings_executed', {
       actionCount: actions.length,
       workflowState: workflow,
     });
@@ -192,7 +277,7 @@ export class ContextManager {
     workflow.userIntent = intent;
     workflow.updatedAt = new Date().toISOString();
     this.localState.set('workflow', workflow);
-    void this.persistEvent('intent_parsed', { workflowState: workflow });
+    this.persist('intent_parsed', { workflowState: workflow });
   }
 
   async addError(error: string): Promise<void> {
@@ -201,12 +286,12 @@ export class ContextManager {
     workflow.errors.push(error);
     workflow.updatedAt = new Date().toISOString();
     this.localState.set('workflow', workflow);
-    void this.persistEvent('workflow_error', { error, workflowState: workflow });
+    this.persist('workflow_error', { error, workflowState: workflow });
   }
 
   async setCustomData<T>(key: string, value: T): Promise<void> {
     this.localState.set(`custom:${key}`, value);
-    void this.persistEvent('custom_data_set', { key, value });
+    this.persist('custom_data_set', { key, value });
   }
 
   async getWorkflowState(): Promise<WorkflowState | null> {
@@ -237,67 +322,12 @@ export class ContextManager {
   }
 
   /**
-   * Returns the Acontext session UUID for this run, or null if Acontext is unconfigured
-   * or if session creation hasn't completed yet (it runs asynchronously).
+   * Fire-and-forget persistence — tags each event with the current workflow phase
+   * so it appears correctly in the Acontext Dashboard timeline.
    */
-  getAcontextSessionId(): string | null {
-    return this.acontextSessionId;
-  }
-
-  private async initAcontextSession(
-    userId: string,
-    initialState: WorkflowState,
-  ): Promise<void> {
-    if (!this.client || !this.workflowId) return;
-
-    try {
-      const session = await this.client.sessions.create({
-        user: userId,
-        configs: { workflowId: this.workflowId },
-        // Disable auto-extraction: we publish structured trace events via TraceEventBus
-        // and don't want Acontext parsing state snapshots as conversational tasks.
-        disableTaskTracking: true,
-      });
-
-      this.acontextSessionId = session.id;
-      console.log(
-        `[context] Acontext session ${session.id} created for workflow ${this.workflowId}`,
-      );
-
-      await this.persistEvent('workflow_initialized', initialState);
-    } catch (err) {
-      console.warn(
-        '[context] Acontext session creation failed — continuing in-memory only:',
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
-
-  private async persistEvent(eventType: string, payload: unknown): Promise<void> {
-    if (!this.client || !this.acontextSessionId) return;
-
+  private persist(eventType: string, payload: unknown): void {
     const workflow = this.localState.get('workflow') as WorkflowState | undefined;
-
-    try {
-      await this.client.sessions.storeMessage(
-        this.acontextSessionId,
-        { role: 'assistant', content: JSON.stringify(payload) },
-        {
-          format: 'openai',
-          meta: {
-            type: eventType,
-            workflowId: this.workflowId,
-            phase: workflow?.currentPhase ?? 'unknown',
-            timestamp: new Date().toISOString(),
-          },
-        },
-      );
-    } catch (err) {
-      console.warn(
-        `[context] Acontext persist "${eventType}" failed — state preserved in-memory:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+    void this.persister.persist(eventType, payload, workflow?.currentPhase);
   }
 }
 

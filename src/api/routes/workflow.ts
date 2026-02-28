@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import {
   requireAuth,
   type AuthenticatedRequest,
@@ -13,6 +13,34 @@ import { persistItinerary } from '../persist-itinerary.js';
 import { supabaseAdmin } from '../../../supabase/supabase.js';
 
 const router = Router();
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+interface PipelineResult {
+  events?: unknown[];
+  rankedEvents?: Array<{ event: unknown; score: number; reasoning: string }>;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Schedule context cleanup 5 minutes after a workflow finishes. */
+function scheduleContextCleanup(workflowId: string): void {
+  setTimeout(() => contextRegistry.delete(workflowId), 5 * 60 * 1000);
+}
+
+/** Emit an error TraceEvent to the SSE bus. */
+function emitPipelineError(workflowId: string, message: string): void {
+  traceEventBus.emit({
+    id: `${workflowId}-error`,
+    traceId: workflowId,
+    type: 'workflow_run',
+    name: 'pipeline-error',
+    status: 'error',
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    error: message,
+  });
+}
 
 router.post(
   '/',
@@ -66,20 +94,16 @@ router.post(
 
       traceContext.run(workflowId, () => {
         run
-          .start({
-            inputData: { formData, userQuery: '' },
-          })
-          .then((result: { status: string; result?: unknown; steps?: unknown }) => {
+          .start({ inputData: { formData, userQuery: '' } })
+          .then((result) => {
             if (result.status === 'success') {
-              const resultData = result.result as { events?: unknown[]; rankedEvents?: { event: unknown; score: number; reasoning: string }[] };
+              const resultData = result.result as PipelineResult | undefined;
               const events = resultData?.events ?? [];
               const rankedEvents = resultData?.rankedEvents ?? [];
               const topCount = rankedEvents.length > 0 ? rankedEvents.length : events.length;
               console.log(
                 `[workflow] ✅ Pipeline success — ${topCount} top picks from ${events.length} events (run: ${workflowId})`,
               );
-              setTimeout(() => contextRegistry.delete(workflowId), 5 * 60 * 1000);
-
               traceEventBus.emit({
                 id: `${workflowId}-result`,
                 traceId: workflowId,
@@ -96,42 +120,18 @@ router.post(
                 },
               });
             } else {
-              console.error(
-                `[workflow] ❌ Pipeline failed (run: ${workflowId})`,
-                result.steps,
-              );
-
-              traceEventBus.emit({
-                id: `${workflowId}-error`,
-                traceId: workflowId,
-                type: 'workflow_run',
-                name: 'pipeline-error',
-                status: 'error',
-                startedAt: new Date().toISOString(),
-                completedAt: new Date().toISOString(),
-                error: 'Workflow did not complete successfully',
-              });
+              console.error(`[workflow] ❌ Pipeline failed (run: ${workflowId})`, result.steps);
               void ctx.addError('Pipeline did not complete successfully').catch(() => {});
-              setTimeout(() => contextRegistry.delete(workflowId), 5 * 60 * 1000);
+              emitPipelineError(workflowId, 'Workflow did not complete successfully');
             }
+            scheduleContextCleanup(workflowId);
           })
           .catch((error: unknown) => {
             console.error('[workflow] Pipeline error:', error);
             const errMsg = error instanceof Error ? error.message : 'Unknown pipeline error';
             void ctx.addError(errMsg).catch(() => {});
-            setTimeout(() => contextRegistry.delete(workflowId), 5 * 60 * 1000);
-
-            traceEventBus.emit({
-              id: `${workflowId}-error`,
-              traceId: workflowId,
-              type: 'workflow_run',
-              name: 'pipeline-error',
-              status: 'error',
-              startedAt: new Date().toISOString(),
-              completedAt: new Date().toISOString(),
-              error:
-                error instanceof Error ? error.message : 'Unknown pipeline error',
-            });
+            emitPipelineError(workflowId, errMsg);
+            scheduleContextCleanup(workflowId);
           });
       });
     } catch (error) {
@@ -149,14 +149,8 @@ router.post(
   '/:workflowId/approve',
   requireAuth,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-    const rawId = req.params.workflowId;
-    const workflowId = Array.isArray(rawId) ? rawId[0] : rawId;
+    const workflowId = req.params.workflowId;
     const { approved } = req.body as { approved?: boolean };
-
-    if (!workflowId) {
-      res.status(400).json({ error: 'Missing workflowId parameter' });
-      return;
-    }
 
     if (typeof approved !== 'boolean') {
       res.status(400).json({ error: 'Missing required field: approved (boolean)' });
