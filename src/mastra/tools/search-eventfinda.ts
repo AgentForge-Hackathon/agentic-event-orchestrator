@@ -137,7 +137,7 @@ export const searchEventfindaTool = createTool({
       return buildSearchResult(
         getEventfindaDemoEvents(input.date),
         'eventfinda', startTime, 'demo',
-        { budgetMax: input.budgetMax, categories: input.categories, maxResults: input.maxResults },
+        { budgetMax: input.budgetMax, maxResults: input.maxResults },
       );
     }
 
@@ -175,7 +175,7 @@ export const searchEventfindaTool = createTool({
 
       return buildSearchResult(
         events, 'eventfinda', startTime, 'live',
-        { budgetMax: input.budgetMax, categories: input.categories, maxResults: input.maxResults },
+        { budgetMax: input.budgetMax, maxResults: input.maxResults },
       );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

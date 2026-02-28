@@ -132,7 +132,7 @@ export const searchEventbriteTool = createTool({
       return buildSearchResult(
         getEventbriteDemoEvents(input.date),
         'eventbrite', startTime, 'demo',
-        { budgetMax: input.budgetMax, categories: input.categories, maxResults: input.maxResults, removeSoldOut: true },
+        { budgetMax: input.budgetMax, maxResults: input.maxResults, removeSoldOut: true },
       );
     }
 
@@ -164,7 +164,7 @@ export const searchEventbriteTool = createTool({
 
       return buildSearchResult(
         events, 'eventbrite', startTime, 'live',
-        { budgetMax: input.budgetMax, categories: input.categories, maxResults: input.maxResults, removeSoldOut: true },
+        { budgetMax: input.budgetMax, maxResults: input.maxResults, removeSoldOut: true },
       );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
