@@ -33,7 +33,7 @@ Most planners are recommendation engines. This is an **Autonomous Execution Syst
   - `recommendationAgent` — GPT-4o-mini, **no tools** — reasoning-only narrator that explains why top picks were chosen (output consumed by trace viewer)
   - `planningAgent` — GPT-4o-mini, **no tools** — receives top 3 ranked events + user constraints, generates structured JSON itinerary plan via LLM reasoning (time blocks, logistics, notes)
   - `executionAgent` — GPT-4o-mini, uses `executeBookingTool` + 11 browser tools (open, snapshot, click, fill, select, press, wait, screenshot, text, eval, close) via Actionbook SDK + CLI
-- [x] **7 Mastra Tools** (`src/mastra/tools/`) — All agent logic extracted into `createTool()` primitives with Zod input/output schemas
+- [x] **15+ Mastra Tools** (`src/mastra/tools/`) — All agent logic extracted into `createTool()` primitives with Zod input/output schemas
   - `parseIntentTool` — Maps PlanFormData → UserConstraints (no LLM needed)
   - `searchEventbriteTool` — **FULLY IMPLEMENTED**: Bright Data Direct API with per-event detail enrichment (time, price, availability via JSON-LD), Schema.org event type support (Event, SocialEvent, EducationEvent, BusinessEvent, etc.), sold-out filtering, URL deduplication, date range filtering, budget/category post-filters + demo fallback with 5 realistic SG events
   - `searchEventfindaTool` — **FULLY IMPLEMENTED**: EventFinda REST API v2 with HTTP Basic auth, category slug mapping (forward + reverse), `fetchWithRetry()` with exponential backoff (MAX_RETRIES=3, 1.1s base delay), date range/budget/category filtering, demo fallback with 5 realistic SG events
@@ -41,21 +41,22 @@ Most planners are recommendation engines. This is an **Autonomous Execution Syst
   - `rankEventsTool` — **FULLY IMPLEMENTED**: Deterministic multi-factor scoring engine — budget fit (30%), category match (25%), rating (20%), availability (15%), weather fit (10%). Hard-filters sold-out/excluded/over-budget events first, then scores remaining. Returns sorted `rankedEvents[]` with per-event `score` and `reasoning` string + `filterStats`.
   - `planItineraryTool` — **FULLY IMPLEMENTED**: Receives ranked events + user constraints, invokes `planningAgent.generate()` for LLM-powered itinerary composition (time blocking, travel logistics, per-item notes), validates and maps LLM JSON output to `Itinerary` domain objects, computes `totalCost` and `totalDuration`, generates `planMetadata` (itinerary name, vibe, cost/person, budget status). Includes `formatSGT()` for Singapore Time display.
   - `executeBookingTool` — **FULLY IMPLEMENTED**: Full Actionbook 7-step booking flow — searches action manuals for verified CSS selectors, opens booking URL, snapshots page for LLM analysis, fills forms (buyer name/email/phone + organizer custom fields by label matching), handles multi-step Eventbrite checkout (ticket selection → attendee form → organizer questions → confirmation), ticket quantity stepper for party size, stuck-page detection, confirmation number extraction (order # regex + success text patterns), screenshot capture. Handles edge cases: sold-out, waitlist, captcha, login walls, payment required, missing URLs. Plus 11 individual browser tools (`browserOpenTool`, `browserSnapshotTool`, `browserClickTool`, `browserFillTool`, `browserSelectTool`, `browserPressTool`, `browserWaitTool`, `browserScreenshotTool`, `browserTextTool`, `browserEvalTool`, `browserCloseTool`) for the execution agent's tool-call interface.
-- [x] **Mastra Workflow** (`src/mastra/workflows/planning-pipeline.ts`) — **Full pipeline**: Intent step invokes `intentAgent.generate()` (GPT-4o-mini LLM enrichment with deterministic fallback) → parallel discovery (2 sources: Eventbrite + EventFinda via direct tool calls for speed) → HallyuCon injection (guaranteed free RSVP event for demo booking flow) → merge + dedup → ranking via `rankEventsTool.execute!()` (deterministic scoring) + `recommendationAgent.generate()` (LLM narrative reasoning for traces) → planning via `planItineraryTool.execute!()` (LLM itinerary composition) → **approval gate** (pipeline pauses, emits `plan_approval` trace, awaits user decision via Promise) → **execution** (sequential booking via `executeBookingTool` for each bookable item with real browser automation) → output. Comprehensive `[pipeline:*]` logging at every stage. Emits structured `TraceEvent`s at each pipeline phase (intent, discovery, recommendation, planning, approval, execution) via `emitTrace()` helper using `AsyncLocalStorage` for traceId threading.
-- [x] **Mastra Entrypoint** (`src/mastra/index.ts`) — Registers all agents, tools, and workflows with the Mastra framework. Configures `Observability` with `SSETracingExporter` for automatic span instrumentation.
+- [x] **Mastra Workflow** (`src/mastra/workflows/planning-pipeline.ts`) — **Full pipeline** with modular step files in `src/mastra/workflows/steps/`: Intent step (`intent.step.ts`) invokes `intentAgent.generate()` (GPT-4o-mini LLM enrichment with deterministic fallback) → `prepareDiscoveryInput` mapper → parallel discovery (`discovery.step.ts`: 2 sources: Eventbrite + EventFinda via direct tool calls for speed) → `mergeAndDeduplicateEvents` mapper (includes HallyuCon injection for guaranteed free RSVP event for demo booking flow) → `rankAndRecommend` mapper (`ranking.step.ts`: deterministic scoring via `rankEventsTool.execute!()` + LLM narrative reasoning via `recommendationAgent.generate()`) → `planItinerary` mapper (`planning.step.ts`: LLM itinerary composition via `planItineraryTool.execute!()`) → **approval gate** (`approval.step.ts`: pipeline pauses, emits `plan_approval` trace, awaits user decision via Promise through in-memory approval registry) → **execution** (`execution.step.ts`: sequential booking via `executeBookingTool` for each bookable item with real browser automation) → output. Comprehensive `[pipeline:*]` logging at every stage. Emits structured `TraceEvent`s at each pipeline phase (intent, discovery, recommendation, planning, approval, execution) via `emitTrace()` helper using `AsyncLocalStorage` for traceId threading. Workflow utilities in `src/mastra/workflows/utils/` include trace helpers (`emitTrace()`, `formatSGT()`, start-time Maps), step types, and constants (`TIME_OF_DAY_WINDOWS`, `DURATION_HOURS`, `MAX_GAP_MINUTES`).
+- [x] **Mastra Entrypoint** (`src/mastra/index.ts`) — Registers all agents, tools, and workflows with the Mastra framework. Configures `Observability` (via `@mastra/observability`) with `SSETracingExporter` for automatic span instrumentation.
 - [x] **Context Manager** (`src/context/context-manager.ts`) — Write-through cache over Acontext Sessions. In-memory Map for zero-latency reads; writes fire-and-forget to Acontext for persistence. Falls back to pure in-memory when `ACONTEXT_API_KEY` is unset.
-- [x] **Frontend scaffold** (`ui/`) — React 19 + Vite + Tailwind + shadcn/ui + Framer Motion
-  - Landing page with shader gradient, hero section
-  - Auth flow (login/signup pages, AuthProvider with Supabase)
+- [x] **Frontend** (`ui/`) — React 19 + Vite + Tailwind + shadcn/ui + Framer Motion + @tanstack/react-query
+  - Landing page with shader gradient (`UnifiedShaderGradient`), hero section, authenticated home view (`AuthenticatedHome`)
+  - Auth flow (login/signup pages, AuthProvider with Supabase, token storage via `tokenStorage.ts`)
   - Onboarding wizard (3-step: name → travel style/budget → interests) — redirects to `/plan` post-onboarding
   - Dashboard page (hardcoded metrics + activity feed) with "Plan a Trip" CTA card → `/plan`
   - Events page (hardcoded event cards)
+  - Itineraries page (`/itineraries` route) — fetches user itineraries from MongoDB via `GET /api/itineraries`, displays list with formatted dates/costs via `useItineraries` hook
   - Protected routes, theme toggle (dark/light)
   - Plan wizard page (`/plan` route) — 4-step guided wizard: Occasion → Budget/Pax → When/Where → Review & Go
   - Trace Viewer components (ActiveAgentBanner, agent-aware PipelineProgress, TraceViewer integration)
-  - API client (`apiClient.ts`) pointing to `/api` with Supabase token auth
+  - API client (`apiClient.ts`) pointing to `/api` with token auth via `tokenStorage.ts`
 - [x] **Project config** — TypeScript strict mode, ESM, path aliases, ESLint
-- [x] **Backend API server** (`src/api/`) — Express server with CORS, health check, auth routes, workflow route
+- [x] **Backend API server** (`src/api/`) — Express 5 server with CORS, health check, auth routes (login/signup/logout/onboarding/profile), workflow route (start + approval), traces SSE route, events route, itineraries route
 - [x] **Supabase Auth** — Client-side auth via Supabase JS SDK, server-side JWT verification middleware
 - [x] **Environment config** (`src/config.ts`) — Zod-validated env loading with dotenv
 
@@ -65,10 +66,10 @@ Most planners are recommendation engines. This is an **Autonomous Execution Syst
 - [x] **EventFinda Integration** — `searchEventfindaTool` fully implemented with EventFinda REST API v2, HTTP Basic auth, category slug mapping, retry with exponential backoff, date/budget/category filters. Falls back to 5 demo events when credentials are missing or on failure.
 - [x] **Browser Automation** — Execution Agent fully wired with Actionbook SDK (action manual search) + CLI (Chrome browser control). `executeBookingTool` implements full 7-step booking flow: manual search → browser open → page snapshot → form fill (CSS selectors + label matching for custom fields) → multi-step checkout → confirmation capture → browser close. 11 individual browser tools registered for agent tool-call interface. Pipeline execution step runs sequentially for each bookable itinerary item post-approval. HallyuCon (free Eventbrite RSVP) injected as guaranteed bookable event for demo.
 - [x] **Tracing System** — Full real-time trace system: `TraceEventBus` (pub/sub with history replay, 10min TTL auto-GC), `SSETracingExporter` (implements Mastra `ObservabilityExporter`, maps spans to structured `TraceEvent`s with reasoning/confidence/tokenUsage/reasoningSteps/decisions metadata), `AsyncLocalStorage`-based trace context for threading traceId through workflow steps. TraceEvent types are shared via `shared/types/trace.ts` (single source of truth). Two event sources: custom narrative events (human-readable, from pipeline) + Mastra auto-instrumented spans (technical, from exporter). Schema includes `ReasoningStep` (label/detail/status) and `Decision` (title/reason/score/data) interfaces for structured explainability.
-- [x] **Backend API Routes** — Workflow POST route done (async, returns `workflowId` immediately); SSE trace streaming route done (`GET /api/traces/stream/:workflowId`); approval endpoint done (`POST /api/workflow/:id/approve` — also persists itinerary to Supabase on approval); events API done (`GET /api/events` with pagination/filtering, `GET /api/events/:id`)
-- [x] **Database** — Full Supabase persistence: `profiles` table (auth/onboarding), `events` table (scraped event cache with RLS public read), `itinerary` + `itinerary_items` tables (user-scoped with RLS). 5 migrations manage schema evolution. Seed data provides 15 SG events + 2 sample itineraries. Itineraries are persisted to DB on plan approval via `persistItinerary()` utility.
+- [x] **Backend API Routes** — Workflow POST route done (async, returns `workflowId` immediately); SSE trace streaming route done (`GET /api/traces/stream/:workflowId`); approval endpoint done (`POST /api/workflow/:id/approve` — persists itinerary to MongoDB on approval); events API done (`GET /api/events` with in-memory caching + live discovery tool calls, `GET /api/events/:id`); itineraries API done (`GET /api/itineraries` — reads from MongoDB)
+- [x] **Database** — **Dual database architecture**: Supabase (Postgres) for auth/profiles + event schema (with RLS, 5 migrations, seed data) AND MongoDB (via Mongoose) for itinerary persistence. `profiles` table in Supabase (auth/onboarding). `events` table in Supabase (scraped event cache with RLS public read). Itineraries persisted to MongoDB `ItineraryModel` on plan approval via `persistItinerary()` utility (`src/api/persist-itinerary.ts`). MongoDB models in `src/mongodb/models/`. Legacy Supabase `itinerary` + `itinerary_items` table migrations exist in `supabase/migrations/` but active persistence uses MongoDB.
 - [x] **Trace Viewer UI** — Full trace viewer with Tier 2 "WOW factor": `TraceViewer` (hierarchical span tree via `parentId` with `buildTree()`/`renderTree()`, auto-scroll to latest, inline approval card display), `ActiveAgentBanner` (animated banner showing current active agent), `PipelineProgress` (5-step horizontal stepper with agent names, glow animations, and Radix tooltip summaries), `SpanCard` (type-colored border, status badge, depth-based indentation, collapsible children with AnimatePresence, expandable metadata), `ReasoningBubble` (chat-bubble with `StreamingText` word-by-word animation), `StreamingText` (requestAnimationFrame-based word reveal at configurable WPS, blinking cursor, `onComplete` callback), `StructuredReasoning` (animated bullet-point reasoning steps with pass/fail/info status icons), `DecisionCard` + `DecisionList` (inline event cards with animated score bars, expandable raw data), `PlanApprovalCard` (itinerary summary with chronological timeline, approve/reject actions). SSE hook (`useTraceStream`) with EventSource, dedup, connection status tracking. Integrated into PlanPage wizard flow.
-- [ ] **Itinerary Display UI** — No timeline view, no booking status display
+- [x] **Itinerary Display UI** — `ItinerariesPage` fetches from `GET /api/itineraries` via `useItineraries` hook, displays itinerary list with formatted dates, costs, and item counts. No detailed timeline view yet.
 - [ ] **Agent Status Dashboard UI** — Partially addressed: `ActiveAgentBanner` shows real-time active agent identity during pipeline execution
 - [x] **Real-time Trace Streaming** — SSE (Server-Sent Events) via Express route + native EventSource on frontend. Chose SSE over WebSocket: one-directional data flow, simpler, native browser support, auto-reconnect.
 - [x] **Event Caching** — Supabase `events` table with seed data (15 SG events) + `GET /api/events` endpoint with pagination, category/availability/date filtering
@@ -239,7 +240,7 @@ AUTH        — Supabase JWT verification on API routes
 |-------|------|--------|
 | **Frontend** | React 19 + Vite + Tailwind + shadcn/ui + Framer Motion | Scaffold done |
 | **Backend API** | Express server | Auth routes + workflow route done |
-| **Database** | Supabase (profiles + events + itinerary + itinerary_items) | DONE — full persistence with RLS, migrations, seed data |
+| **Database** | Supabase (profiles + events) + MongoDB (itineraries via Mongoose) | DONE — dual DB: Supabase for auth/profiles/events with RLS + MongoDB for itinerary persistence |
 | **LLM** | OpenAI GPT-4o-mini (via `@ai-sdk/openai` + Mastra Agent) | Intent + Recommendation + Planning Agents wired |
 | **Data Acquisition** | Bright Data Direct API + EventFinda REST API v2 | Eventbrite DONE, EventFinda DONE |
 | **Browser Automation** | Actionbook SDK (`@actionbookdev/sdk`) + CLI (`@actionbookdev/cli`) | DONE — full 7-step booking flow wired into pipeline |
@@ -260,7 +261,14 @@ src/
 │   ├── index.ts                 # Mastra entrypoint — registers agents, tools, workflows + Observability (SSETracingExporter)
 │   ├── agents/
 │   │   ├── index.ts             # Barrel export
-│   │   ├── prompts.ts           # All 5 system prompts
+│   │   ├── prompts.ts           # Legacy barrel — re-exports from prompts/
+│   │   ├── prompts/             # Individual agent system prompts
+│   │   │   ├── index.ts           # Barrel export for all prompts
+│   │   │   ├── intent.prompt.ts   # Intent agent system prompt
+│   │   │   ├── discovery.prompt.ts # Discovery agent system prompt
+│   │   │   ├── recommendation.prompt.ts # Recommendation agent system prompt
+│   │   │   ├── planning.prompt.ts # Planning agent system prompt
+│   │   │   └── execution.prompt.ts # Execution agent system prompt
 │   │   ├── intent.ts            # intentAgent — GPT-4o-mini + parseIntentTool
 │   │   ├── discovery.ts         # discoveryAgent — GPT-4o-mini + search tools
 │   │   ├── recommendation.ts    # recommendationAgent — GPT-4o-mini, NO tools — reasoning-only narrator for traces
@@ -278,7 +286,18 @@ src/
 │   │   ├── plan-itinerary.ts    # DONE: LLM-powered itinerary composition via planningAgent + structured prompt → JSON → domain objects
 │   │   └── execute-booking.ts   # DONE: Full Actionbook 7-step booking flow + 11 individual browser tools
 │   └── workflows/
-│       └── planning-pipeline.ts # Full pipeline: intent (LLM) → parallel discovery → HallyuCon injection → merge + dedup → ranking (tool) + recommendation (LLM) → planning (LLM) → approval gate → execution (Actionbook booking) → output
+│       ├── planning-pipeline.ts # Full pipeline: intent (LLM) → parallel discovery → HallyuCon injection → merge + dedup → ranking (tool) + recommendation (LLM) → planning (LLM) → approval gate → execution (Actionbook booking) → output
+│       ├── steps/               # Modular step implementations
+│       │   ├── intent.step.ts     # Intent understanding + LLM enrichment via intentAgent.generate()
+│       │   ├── discovery.step.ts  # prepareDiscoveryInput() + mergeAndDeduplicateEvents() (includes HallyuCon injection for demo)
+│       │   ├── ranking.step.ts    # rankAndRecommend() deterministic scoring + LLM narrative
+│       │   ├── planning.step.ts   # planItinerary() LLM plan generation + tool validation
+│       │   ├── approval.step.ts   # awaitApproval() human-in-the-loop gate via approval registry
+│       │   └── execution.step.ts  # executeBookings() sequential Actionbook booking for each approved item
+│       └── utils/               # Workflow utilities
+│           ├── trace-helpers.ts # emitTrace(), formatSGT(), start-time Maps
+│           ├── types.ts         # Workflow step types
+│           └── constants.ts     # TIME_OF_DAY_WINDOWS, DURATION_HOURS, MAX_GAP_MINUTES
 ├── config.ts                    # Zod-validated env config (dotenv) — DONE (includes BRIGHT_DATA_API_KEY)
 ├── lib/
 │   ├── supabase.ts             # DEPRECATED — use supabase/supabase.ts instead
@@ -292,21 +311,27 @@ src/
 │   ├── trace-context.ts         # AsyncLocalStorage<string> for threading traceId through workflow steps
 │   └── index.ts                 # Barrel exports (traceEventBus, SSETracingExporter, traceContext)
 ├── api/
-│   ├── server.ts                # Express server — DONE (health + auth + workflow + traces + events routes)
+│   ├── server.ts                # Express server — DONE (health + auth + workflow + traces + events + itineraries routes)
 │   ├── approval-registry.ts     # In-memory approval gate registry (waitForApproval/resolveApproval) with 30min TTL — DONE
-│   ├── persist-itinerary.ts     # Maps domain Itinerary → DB rows, inserts itinerary + itinerary_items on approval — DONE
+│   ├── persist-itinerary.ts     # Maps domain Itinerary → MongoDB document via ItineraryModel on approval — DONE
 │   ├── middleware/
 │   │   └── auth.ts              # Supabase JWT verification middleware — DONE
 │   └── routes/
-│       ├── auth.ts              # POST /api/auth/onboarding, GET /api/auth/profile — DONE
+│       ├── auth.ts              # POST /api/auth/login, POST /api/auth/signup, POST /api/auth/logout, POST /api/auth/onboarding, GET /api/auth/profile — DONE
 │       ├── workflow.ts           # POST /api/workflow + POST /api/workflow/:id/approve — DONE (async pipeline + approval gate)
 │       ├── traces.ts             # GET /api/traces/stream/:workflowId — DONE (SSE endpoint with history replay, heartbeat, auto-close)
-│       └── events.ts             # GET /api/events (paginated, filtered) + GET /api/events/:id — DONE
+│       ├── events.ts             # GET /api/events (paginated, filtered) + GET /api/events/:id — DONE
+│       └── itineraries.ts        # GET /api/itineraries — DONE (reads from MongoDB)
 ├── types/
 │   └── index.ts                 # Zod schemas + PlanFormData + mapPlanFormToConstraints — DONE
 ├── index.ts                     # Main exports (re-exports from mastra/) — DONE
 ├── test-scraper.ts              # CLI test runner for searchEventbriteTool (npx tsx src/test-scraper.ts <test>)
 └── test-eventfinda.ts           # CLI test runner for searchEventfindaTool (npx tsx src/test-eventfinda.ts <test>)
+├── mongodb/
+│   ├── index.ts                 # connectMongo() via Mongoose — DONE
+│   └── models/
+│       ├── Itinerary.ts         # Full Mongoose schema (IEventSnapshot, IItineraryItem, IItinerary) indexed on createdBy — DONE
+│       └── Event.ts             # Stubbed/commented out (not yet implemented)
 
 supabase/
 ├── config.toml                  # Supabase local dev config (project ID, API ports, auth settings)
@@ -325,6 +350,7 @@ ui/
 │   │   ├── auth/ProtectedRoute.tsx    # DONE
 │   │   ├── home/HeroSection.tsx       # DONE
 │   │   ├── home/UnifiedShaderGradient.tsx # DONE
+│   │   ├── home/AuthenticatedHome.tsx # DONE (authenticated landing view with CTA)
 │   │   ├── layout/                    # DONE (Header, Footer, Layout, PageHeader, AppRoutes)
 │   │   ├── theme/                     # DONE (ThemeToggle, ThemeProvider)
 │   │   ├── trace/
@@ -343,10 +369,12 @@ ui/
 │   │   ├── use-toast.ts              # DONE
 │   │   ├── use-mobile.tsx            # DONE
 │   │   ├── useTraceStream.ts         # DONE (EventSource SSE hook with dedup + connection status)
-│   │   └── useWorkflow.ts            # NEEDS: workflow state management
+│   │   ├── useWorkflow.ts            # NEEDS: workflow state management
+│   │   └── useItineraries.ts         # DONE (fetches from /api/itineraries, format helpers)
 │   ├── lib/
 │   │   ├── apiClient.ts              # DONE (Supabase token auth)
 │   │   ├── supabase.ts              # DONE (frontend Supabase client)
+│   │   ├── tokenStorage.ts           # DONE (localStorage token get/set/remove helpers)
 │   │   └── utils.ts                  # DONE
 │   └── pages/
 │       ├── Index.tsx                  # DONE
@@ -358,6 +386,7 @@ ui/
 │       ├── EventsPage.tsx             # DONE (hardcoded, needs real data)
 │       ├── AboutPage.tsx              # DONE
 │       └── NotFound.tsx               # DONE
+│       └── ItinerariesPage.tsx       # DONE (fetches user itineraries from MongoDB via useItineraries hook)
 ├── package.json
 ├── vite.config.ts
 └── tailwind.config.ts
@@ -384,11 +413,14 @@ ui/
 | `@types/cors` | ^2.8.19 | CORS type definitions | Dev dep |
 | `@actionbookdev/sdk` | | Actionbook SDK — action manual search for verified CSS selectors | Installed, actively used |
 | `@actionbookdev/cli` | | Actionbook CLI — Chrome browser control (open, click, fill, snapshot, etc.) | Installed, actively used |
+| `mongoose` | ^8.13.2 | MongoDB ODM for itinerary persistence | Installed, actively used |
+| `@mastra/observability` | | Mastra observability (SSETracingExporter) | Installed, actively used |
+| `@acontext/acontext` | | Acontext SDK for durable workflow state persistence | Installed, actively used |
 
 ### Backend — Needs to be Added
 | Package | Purpose | Owner |
 |---------|---------|-------|
-| `playwright` | Browser automation for Execution Agent | Jared |
+| (none currently) | All required packages are installed | — |
 
 ### Frontend (`ui/package.json`) — Currently Installed
 | Package | Version | Purpose | Status |
@@ -405,12 +437,12 @@ ui/
 | `sonner` | Toast notifications | Working |
 | `zod` | ^4.3.6 | Frontend validation | Working |
 | `@supabase/supabase-js` | ^2.49.8 | Supabase auth client | Working |
+| `@tanstack/react-query` | ^5.x | Server state management, caching | Working |
 
 ### Frontend — Needs to be Added
 | Package | Purpose | Owner |
 |---------|---------|-------|
-| `@tanstack/react-query` | Server state management, caching | Xinyu |
-| EventSource (native) | Real-time SSE trace streaming | ✅ Done (native, no package needed) |
+| (none currently) | All required packages are installed | — |
 
 ---
 
@@ -531,13 +563,13 @@ ui/
 | POST | `/api/auth/onboarding` | Save onboarding preferences to Supabase `profiles` | ✅ DONE |
 | GET | `/api/auth/profile` | Get user profile (onboarding status) | ✅ DONE |
 | GET | `/api/health` | Health check | ✅ DONE |
-| GET | `/api/events` | Get events (paginated, filterable by category/availability/date) | ✅ DONE |
+| GET | `/api/events` | Get events (paginated, filterable by category/availability/date) with in-memory caching + live discovery tool calls | ✅ DONE |
 | GET | `/api/events/:id` | Get single event details | ✅ DONE |
 | POST | `/api/workflow` | Start new planning workflow (async) | ✅ DONE (returns `{ workflowId }` immediately, pipeline runs in background with traceContext) |
-| POST | `/api/workflow/:id/approve` | Approve/reject plan (approval gate) + persist itinerary to DB on approval | ✅ DONE (resolves pipeline Promise, persists to `itinerary` + `itinerary_items` tables, accepts `{ approved: boolean }`) |
+| POST | `/api/workflow/:id/approve` | Approve/reject plan (approval gate) + persist itinerary to MongoDB on approval | ✅ DONE (resolves pipeline Promise, persists to MongoDB via `ItineraryModel`, accepts `{ approved: boolean }`) |
 | GET | `/api/workflow/:id` | Get workflow status + result | NOT STARTED |
 | GET | `/api/traces/stream/:workflowId` | Real-time SSE trace stream | ✅ DONE (history replay, 15s heartbeat, auto-close on completion) |
-| GET | `/api/recommendations` | Get recommendations for query | NOT STARTED |
+| GET | `/api/itineraries` | Get user’s itineraries (protected, reads from MongoDB) | ✅ DONE |
 | GET | `/api/recommendations` | Get recommendations for query | NOT STARTED |
 
 ---
@@ -567,8 +599,14 @@ BRIGHT_DATA_ZONE=                 # Optional: zone override
 EVENTFINDA_USERNAME=              # HTTP Basic auth username
 EVENTFINDA_PASSWORD=              # HTTP Basic auth password
 
+# Acontext (Shared Memory)
+ACONTEXT_API_KEY=                # Acontext SDK for durable workflow state (optional — falls back to in-memory)
+
 # ActionBook (Execution Agent)
 ACTIONBOOK_API_KEY=
+
+# MongoDB (Itinerary Persistence)
+MONGO_URI=mongodb://localhost:27017/itinerary-planner  # MongoDB connection string
 
 # Optional
 GOOGLE_MAPS_API_KEY=             # Route optimization
@@ -585,7 +623,7 @@ VITE_SUPABASE_ANON_KEY=eyJ...                        # Same as SUPABASE_ANON_KEY
 
 ### Supabase Setup Requirements
 
-The backend uses Supabase for all persistence. Schema is managed via 5 migrations in `supabase/migrations/`.
+The backend uses **Supabase** (Postgres) for auth, profiles, and event caching, and **MongoDB** (via Mongoose) for itinerary persistence. Supabase schema is managed via 5 migrations in `supabase/migrations/`.
 
 #### Tables
 
@@ -678,31 +716,30 @@ When a user approves a plan via `POST /api/workflow/:id/approve`:
 
 1. Pipeline's approval gate resolves -> workflow continues
 2. `persistItinerary(userId, itinerary)` is called (`src/api/persist-itinerary.ts`)
-3. Domain `Itinerary` is mapped to DB row: `name` -> `summary`, item prices summed -> `total_cost_min`/`total_cost_max`
-4. Each `ItineraryItem` is mapped: `event` -> `event_snapshot` (JSONB), `scheduledTime` -> `time_start`/`time_end`, array index -> `sort_order`
-5. Parent `itinerary` row inserted first, then batch `itinerary_items` with FK reference
-6. If items insert fails, parent row is cleaned up (deleted)
-7. Uses `supabaseAdmin` (service role) to bypass RLS
+3. `computeCostRange()` derives `totalCost.{min,max}` from individual item event prices (falls back to `itinerary.totalCost` scalar if no items carry price data)
+4. `ItineraryModel.create({...})` inserts a single MongoDB document with all items embedded as subdocuments
+5. Each item's `event` field is serialized via `eventToSnapshot()` which flattens domain `Event` to the `IEventSnapshot` interface
+6. Returns `{ itineraryId, itemCount }` on success; throws on MongoDB insert failure
 
-**Schema mapping (domain -> DB):**
+**Schema mapping (domain → MongoDB):**
 
-| Domain (`Itinerary`) | DB (`itinerary`) | Notes |
+| Domain (`Itinerary`) | MongoDB (`itineraries` collection) | Notes |
 |---|---|---|
 | `name` | `summary` | Direct mapping |
-| (computed) | `total_cost_min` / `total_cost_max` | Sum of item event `price.min`/`price.max` |
-| N/A | `total_cost_currency` | Hardcoded `'SGD'` |
-| `status` | `status` | Default `'draft'` |
-| (from auth) | `created_by` | `req.user.id` from JWT |
+| `date` | `plannedDate` | ISO 8601 date string (nullable) |
+| (computed) | `totalCost.min` / `totalCost.max` | Sum of item event `price.min`/`price.max` via `computeCostRange()` |
+| N/A | `totalCost.currency` | Hardcoded `'SGD'` |
+| (from auth) | `createdBy` | `req.user.id` from JWT (Supabase UUID) — indexed for fast per-user queries |
+| (auto) | `createdAt` / `updatedAt` | Mongoose `timestamps: true` |
 
-| Domain (`ItineraryItem`) | DB (`itinerary_items`) | Notes |
+| Domain (`ItineraryItem`) | MongoDB (embedded `items[]` array) | Notes |
 |---|---|---|
-| `event` (full object) | `event_snapshot` (JSONB) | Serialized via `eventToSnapshot()` |
-| `event.id` | `event_id` | FK to events table (nullable) |
-| `scheduledTime.start` | `time_start` | ISO timestamp |
-| `scheduledTime.end` | `time_end` | ISO timestamp |
-| `notes` | `notes` | Direct |
-| (array index) | `sort_order` | Integer ordering |
+| `event` (full object) | `items[].event` (IEventSnapshot) | Serialized via `eventToSnapshot()` — includes id, name, description, url, image, venue, location, startTime, endTime, price, category, tags, rating, availability, source |
+| `scheduledTime.start` | `items[].time.start` | ISO timestamp string |
+| `scheduledTime.end` | `items[].time.end` | ISO timestamp string |
+| `notes` | `items[].notes` | Direct (nullable) |
 
+**Note:** Legacy Supabase `itinerary` + `itinerary_items` table migrations exist in `supabase/migrations/` but active persistence uses MongoDB via Mongoose.
 ---
 
 ## Testing
