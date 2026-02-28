@@ -2,6 +2,7 @@ import { executeBookingTool, type BookingResult } from '../../tools/execute-book
 import { traceContext } from '../../../tracing/index.js';
 import { contextRegistry } from '../../../context/index.js';
 import { emitTrace } from '../utils/trace-helpers.js';
+import { buildContextBlock } from '../utils/context-block.js';
 
 /**
  * Mapper: Executes bookings for approved itinerary items via Actionbook.
@@ -111,6 +112,13 @@ export async function executeBookings({ inputData }: { inputData: {
   console.log(`[pipeline:execution] 🎯 Starting booking execution for ${bookableItems.length} items`);
   const executionStartTime = Date.now();
 
+  // Build pipeline context summary for trace metadata (execution is deterministic,
+  // so we log context for observability rather than injecting into an LLM prompt)
+  const pipelineContext = await buildContextBlock(traceId);
+  if (pipelineContext) {
+    console.log(`[pipeline:execution] Pipeline context available (${pipelineContext.length} chars)`);
+  }
+
   emitTrace({
     id: `execution-started-${Date.now()}`,
     type: 'booking_execution',
@@ -128,7 +136,6 @@ export async function executeBookings({ inputData }: { inputData: {
       },
     },
   });
-
   // ── Context: execution started ──
   const _execCtx = contextRegistry.get(traceId);
   void _execCtx?.updateAgentState({ agentId: 'execution-agent', status: 'running', timestamp: new Date().toISOString() }).catch(() => {});
@@ -242,7 +249,7 @@ export async function executeBookings({ inputData }: { inputData: {
           },
         },
       });
-    } catch (err) {
+    } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : 'Unknown error';
       console.error(`[pipeline:execution] ❌ Booking failed for ${item.event.name}:`, errMsg);
 
