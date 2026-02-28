@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: agentic-event-orchestrator
+    env: node
+    plan: starter
+    # Explicitly install devDependencies so TypeScript, @types/*, tsx are available for build
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
