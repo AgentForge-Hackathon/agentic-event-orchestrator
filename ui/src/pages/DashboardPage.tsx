@@ -24,40 +24,45 @@ import {
   type Itinerary,
 } from '@/hooks/useItineraries';
 
-// ─── Hardcoded upcoming bookings (endpoint not yet built) ──────────────────
-
-const upcomingBookings = [
-  {
-    id: 'bk-001',
-    eventTitle: 'Marina Bay Sands Light Show',
-    date: '2026-03-01',
-    time: '8:00 PM',
-    status: 'confirmed' as const,
-    partySize: 2,
-  },
-  {
-    id: 'bk-002',
-    eventTitle: 'Wine Tasting at Wine Connection',
-    date: '2026-03-05',
-    time: '7:30 PM',
-    status: 'pending' as const,
-    partySize: 4,
-  },
-];
-
 // ─── Dashboard ─────────────────────────────────────────────────────────────
 
 export function DashboardPage() {
   const { data: itineraries = [], isLoading: itinerariesLoading } = useItineraries();
-
-  // Show the 3 most recent itineraries (API already returns newest first)
-  const recentItineraries = itineraries.slice(0, 3);
 
   // Derived stats from real data
   const totalSpent = itineraries.reduce(
     (sum, it) => sum + (it.totalCost?.max ?? 0),
     0,
   );
+
+  // Itineraries whose effective date is in the future = "upcoming", soonest first
+  const now = new Date();
+  const getEffectiveDate = (it: Itinerary) =>
+    it.plannedDate ?? it.items[0]?.time.start ?? null;
+  const upcomingItineraries = itineraries
+    .filter((it) => {
+      const dateStr = getEffectiveDate(it);
+      return dateStr ? new Date(dateStr) > now : false;
+    })
+    .sort((a, b) => {
+      const da = new Date(getEffectiveDate(a)!).getTime();
+      const db = new Date(getEffectiveDate(b)!).getTime();
+      return da - db;
+    });
+
+  // Collect all non-null ratings across every itinerary item
+  const allRatings = itineraries.flatMap((it) =>
+    it.items.map((item) => item.event.rating).filter((r): r is number => r != null),
+  );
+  const avgRating =
+    allRatings.length > 0
+      ? (allRatings.reduce((sum, r) => sum + r, 0) / allRatings.length).toFixed(1)
+      : null;
+
+  // Show the 3 most recent past itineraries (exclude upcoming ones)
+  const pastItineraries = itineraries
+    .filter((it) => !upcomingItineraries.includes(it))
+    .slice(0, 3);
 
   return (
     <Layout>
@@ -94,9 +99,13 @@ export function DashboardPage() {
           <MetricCard
             icon={Ticket}
             label="Upcoming Bookings"
-            value={String(upcomingBookings.length)}
+            value={itinerariesLoading ? '—' : String(upcomingItineraries.length)}
           />
-          <MetricCard icon={Star} label="Avg. Rating" value="4.8" />
+          <MetricCard
+            icon={Star}
+            label="Avg. Rating"
+            value={itinerariesLoading ? '—' : (avgRating ?? '—')}
+          />
           <MetricCard
             icon={TrendingUp}
             label="Total Spent"
@@ -114,32 +123,56 @@ export function DashboardPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {upcomingBookings.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No upcoming bookings yet.</p>
-              ) : (
-                upcomingBookings.map((booking) => (
+              {itinerariesLoading ? (
+                [0, 1].map((i) => (
                   <div
-                    key={booking.id}
-                    className="flex items-start gap-3 p-3 rounded-lg border bg-background"
+                    key={i}
+                    className="flex items-start gap-3 p-3 rounded-lg border bg-background animate-pulse"
                   >
-                    <Calendar
-                      className="w-5 h-5 text-primary mt-0.5 flex-shrink-0"
-                      aria-hidden="true"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium">{booking.eventTitle}</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {booking.date} at {booking.time} · {booking.partySize}{' '}
-                        {booking.partySize === 1 ? 'person' : 'people'}
-                      </p>
+                    <div className="w-5 h-5 rounded bg-muted mt-0.5 flex-shrink-0" />
+                    <div className="flex-1 space-y-2">
+                      <div className="h-4 w-40 rounded bg-muted" />
+                      <div className="h-3 w-56 rounded bg-muted" />
                     </div>
-                    <Badge
-                      variant={booking.status === 'confirmed' ? 'default' : 'secondary'}
-                    >
-                      {booking.status === 'confirmed' ? 'Confirmed' : 'Pending'}
-                    </Badge>
                   </div>
                 ))
+              ) : upcomingItineraries.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No upcoming bookings yet.</p>
+              ) : (
+                upcomingItineraries.slice(0, 3).map((itinerary) => {
+                  const dateStr = itinerary.plannedDate ?? itinerary.items[0]?.time.start;
+                  const firstEvent = itinerary.items[0]?.event;
+
+                  return (
+                    <div
+                      key={itinerary._id}
+                      className="flex items-start gap-3 p-3 rounded-lg border bg-background"
+                    >
+                      <Calendar
+                        className="w-5 h-5 text-primary mt-0.5 flex-shrink-0"
+                        aria-hidden="true"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium">
+                          {itinerary.summary ?? firstEvent?.name ?? 'Upcoming Plan'}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {dateStr ? formatDate(dateStr) : ''}
+                          {dateStr && firstEvent ? ' at ' : ''}
+                          {firstEvent ? formatTime(itinerary.items[0].time.start) : ''}
+                          {itinerary.items.length > 0 && (
+                            <>
+                              {' '}
+                              &middot; {itinerary.items.length}{' '}
+                              {itinerary.items.length === 1 ? 'event' : 'events'}
+                            </>
+                          )}
+                        </p>
+                      </div>
+                      <Badge variant="secondary">Upcoming</Badge>
+                    </div>
+                  );
+                })
               )}
             </CardContent>
           </Card>
@@ -195,7 +228,7 @@ export function DashboardPage() {
         )}
 
         {/* Empty state */}
-        {!itinerariesLoading && recentItineraries.length === 0 && (
+        {!itinerariesLoading && pastItineraries.length === 0 && (
           <Card>
             <CardContent className="py-10 flex flex-col items-center gap-3 text-center">
               <Sparkles className="w-8 h-8 text-muted-foreground" aria-hidden="true" />
@@ -207,9 +240,9 @@ export function DashboardPage() {
         )}
 
         {/* Real itinerary cards */}
-        {!itinerariesLoading && recentItineraries.length > 0 && (
+        {!itinerariesLoading && pastItineraries.length > 0 && (
           <div className="space-y-4">
-            {recentItineraries.map((itinerary) => (
+            {pastItineraries.map((itinerary) => (
               <PastItineraryCard key={itinerary._id} itinerary={itinerary} />
             ))}
           </div>
