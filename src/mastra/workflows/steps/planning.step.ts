@@ -3,6 +3,7 @@ import { planItineraryTool } from '../../tools/plan-itinerary.js';
 import { traceContext } from '../../../tracing/index.js';
 import { contextRegistry } from '../../../context/index.js';
 import { emitTrace, formatSGT, planningStartTimes } from '../utils/trace-helpers.js';
+import { buildContextBlock } from '../utils/context-block.js';
 import { TIME_OF_DAY_WINDOWS, OCCASION_DEFAULT_WINDOWS, FLEXIBLE_FALLBACK, DURATION_HOURS, MAX_GAP_MINUTES } from '../utils/constants.js';
 
 /**
@@ -108,7 +109,10 @@ export async function planItinerary({ inputData, mastra }: { inputData: {
 
   const maxHours = DURATION_HOURS[duration] ?? 4;
 
-  const planningPrompt = `Plan a complete ${occasion.replace(/_/g, ' ')} itinerary for ${date}.
+  // Inject accumulated pipeline context into the planning agent prompt
+  const pipelineContext = await buildContextBlock(traceId);
+
+  const planningPrompt = `${pipelineContext}Plan a complete ${occasion.replace(/_/g, ' ')} itinerary for ${date}.
 
 TIME WINDOW: ${timeWindow.label} (${timeWindow.range}) — all activities MUST start and end within this window.
 TOTAL PLAN DURATION: The entire plan (first activity start to last activity end) MUST NOT exceed ${maxHours} hours. This is a hard limit — do NOT spread activities across the full time window.

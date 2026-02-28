@@ -4,6 +4,7 @@ import { recommendationAgent } from '../../agents/recommendation.js';
 import { traceContext } from '../../../tracing/index.js';
 import { contextRegistry } from '../../../context/index.js';
 import { emitTrace, rankingStartTimes } from '../utils/trace-helpers.js';
+import { buildContextBlock } from '../utils/context-block.js';
 
 /**
  * Mapper: Ranks events using deterministic scoring + LLM narrative reasoning.
@@ -121,7 +122,10 @@ export async function rankAndRecommend({ inputData }: { inputData: {
   } = {};
 
   try {
-    const reasoningPrompt = `User request: ${intentSummary ?? 'Plan an outing'}
+    // Inject accumulated pipeline context into the recommendation agent prompt
+    const pipelineContext = await buildContextBlock(traceId);
+
+    const reasoningPrompt = `${pipelineContext}User request: ${intentSummary ?? 'Plan an outing'}
 Budget: $${budgetMin ?? 0}-${budgetMax ?? '∞'}
 Preferred categories: ${preferredCategories?.join(', ') ?? 'all'}
 Excluded categories: ${excludedCategories?.join(', ') ?? 'none'}

@@ -11,6 +11,7 @@ import { searchEventfindaTool } from '../../tools/search-eventfinda.js';
 import { traceContext } from '../../../tracing/index.js';
 import { contextRegistry } from '../../../context/index.js';
 import { emitTrace } from '../utils/trace-helpers.js';
+import { buildContextBlock } from '../utils/context-block.js';
 
 export const intentStep = createStep({
   id: 'intent-understanding',
@@ -65,7 +66,11 @@ export const intentStep = createStep({
 
     try {
       const intentAgent = mastra.getAgent('intentAgent');
-      const prompt = `User request: ${mapped.naturalLanguageSummary}${userQuery ? `\nAdditional context: ${userQuery}` : ''}
+
+      // Inject accumulated pipeline context (minimal for first agent, valuable on re-runs)
+      const pipelineContext = await buildContextBlock(traceContext.getStore() ?? undefined);
+
+      const prompt = `${pipelineContext}User request: ${mapped.naturalLanguageSummary}${userQuery ? `\nAdditional context: ${userQuery}` : ''}
 
 Occasion: ${formData.occasion}
 Budget: ${formData.budgetRange}
